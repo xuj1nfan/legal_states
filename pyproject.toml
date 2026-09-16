@@ -1,0 +1,28 @@
+[project]
+name = "legal-state-pilot"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+authors = [
+    { name = "xuj1nfan", email = "656488521@qq.com" }
+]
+requires-python = ">=3.12"
+dependencies = [
+    "httpx>=0.28.1",
+    "pandas>=3.0.5",
+    "pydantic>=2.13.5",
+    "pyyaml>=6.0.3",
+    "tqdm>=4.70.1",
+]
+
+[project.scripts]
+legal-state-pilot = "legal_state_pilot:main"
+
+[build-system]
+requires = ["uv_build>=0.12.13,<0.13.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+]
