@@ -36,9 +36,19 @@ def test_build_action_prompt_contains_inputs_and_only_allowed_formats(
     assert '"operation":"COMMIT"' in prompt
     assert '"operation":"EXPAND_ISSUE"' not in prompt
     assert '"operation":"RESOLVE"' not in prompt
+    assert '"operation":"STOP"' not in prompt
     assert "只输出一个合法 JSON 对象" in prompt
     assert "不要输出 Markdown、解释或思维链" in prompt
     assert "不得增加额外字段" in prompt
+
+
+def test_build_action_prompt_includes_stop_format_and_guidance(
+    state: LegalState,
+) -> None:
+    prompt = build_action_prompt("案件", "问题", state, [ActionName.STOP])
+    assert '"operation":"STOP"' in prompt
+    assert "STOP 表示当前推理已经可以结束" in prompt
+    assert "只在认为当前状态已经足以形成最终回答时选择 STOP" in prompt
 
 
 def test_build_action_prompt_deduplicates_allowed_operations(state: LegalState) -> None:

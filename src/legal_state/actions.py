@@ -10,6 +10,7 @@ __all__ = [
     "CommitAction",
     "ExpandIssueAction",
     "ResolveAction",
+    "StopAction",
     "parse_action_json",
 ]
 
@@ -19,6 +20,7 @@ class ActionName(StrEnum):
     BIND_FACT = "BIND_FACT"
     COMMIT = "COMMIT"
     RESOLVE = "RESOLVE"
+    STOP = "STOP"
 
 
 class _ActionModel(BaseModel):
@@ -49,8 +51,16 @@ class ResolveAction(_ActionModel):
     issue_id: str = Field(min_length=1)
 
 
+class StopAction(_ActionModel):
+    operation: Literal[ActionName.STOP]
+
+
 Action = Annotated[
-    ExpandIssueAction | BindFactAction | CommitAction | ResolveAction,
+    ExpandIssueAction
+    | BindFactAction
+    | CommitAction
+    | ResolveAction
+    | StopAction,
     Field(discriminator="operation"),
 ]
 

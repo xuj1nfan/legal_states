@@ -7,6 +7,7 @@ from legal_state.actions import (
     CommitAction,
     ExpandIssueAction,
     ResolveAction,
+    StopAction,
     parse_action_json,
 )
 
@@ -39,6 +40,7 @@ from legal_state.actions import (
             '{"operation":"RESOLVE","issue_id":"I1"}',
             ResolveAction,
         ),
+        ('{"operation":"STOP"}', StopAction),
     ],
 )
 def test_parse_valid_action_json(payload: str, expected_type: type) -> None:
@@ -61,12 +63,22 @@ def test_parse_rejects_invalid_missing_or_extra_fields(payload: str) -> None:
         parse_action_json(payload)
 
 
-def test_action_models_forbid_extra_fields() -> None:
-    with pytest.raises(ValidationError, match="unexpected"):
-        BindFactAction.model_validate_json(
-            '{"operation":"BIND_FACT","issue_id":"I1",'
-            '"fact_ids":["F1"],"unexpected":true}'
-        )
+@pytest.mark.parametrize(
+    ("model", "payload"),
+    [
+        (
+            BindFactAction,
+            (
+                '{"operation":"BIND_FACT","issue_id":"I1",'
+                '"fact_ids":["F1"],"unexpected":true}'
+            ),
+        ),
+        (StopAction, '{"operation":"STOP","reason":"done"}'),
+    ],
+)
+def test_action_models_forbid_extra_fields(model: type, payload: str) -> None:
+    with pytest.raises(ValidationError):
+        model.model_validate_json(payload)
 
 
 @pytest.mark.parametrize(
