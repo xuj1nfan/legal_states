@@ -4,13 +4,13 @@ from typing import Self
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 __all__ = [
-    "IssueStatus",
-    "Issue",
-    "Fact",
-    "Knowledge",
-    "Relation",
     "Conclusion",
+    "Fact",
+    "Issue",
+    "IssueStatus",
+    "Knowledge",
     "LegalState",
+    "Relation",
     "StateTransition",
 ]
 
