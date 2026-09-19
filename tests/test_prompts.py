@@ -47,8 +47,8 @@ def test_build_action_prompt_includes_stop_format_and_guidance(
 ) -> None:
     prompt = build_action_prompt("案件", "问题", state, [ActionName.STOP])
     assert '"operation":"STOP"' in prompt
-    assert "STOP 表示当前推理已经可以结束" in prompt
-    assert "只在认为当前状态已经足以形成最终回答时选择 STOP" in prompt
+    assert "当前 LegalState 无需继续更新，可以结束状态构建" in prompt
+    assert "STOP 不生成也不等于最终答案" in prompt
 
 
 def test_build_action_prompt_deduplicates_allowed_operations(state: LegalState) -> None:
