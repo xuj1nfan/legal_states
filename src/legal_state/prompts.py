@@ -72,8 +72,8 @@ def build_action_prompt(
     stop_instruction = ""
     if ActionName.STOP in operations:
         stop_instruction = (
-            "\n7.当你认为当前 LegalState 已经无需继续更新时，可以选择 STOP；"
-            "STOP 仅表示结束状态构建，不生成也不等同于最终答案。"
+            "\n7. 当前 LegalState 无需继续更新，可以结束状态构建；"
+            "STOP 不生成也不等于最终答案。"
         )
     formats = "\n".join(
         "- "
