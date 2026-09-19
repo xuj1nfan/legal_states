@@ -1,0 +1,12 @@
+.env
+.env.*
+!.env.example
+
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+.venv/
+
+Legal_State_Pilot_v0.1.md
+research plan-3.pdf
