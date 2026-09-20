@@ -85,6 +85,7 @@ class ModelClient:
             json={
                 "model": self._model,
                 "messages": [{"role": "user", "content": prompt}],
+                "thinking": {"type":"disabled"},
                 "temperature": 0,
                 "max_tokens": 2048,
                 "n": 1,

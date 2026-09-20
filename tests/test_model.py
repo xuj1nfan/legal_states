@@ -82,6 +82,7 @@ def test_generate_returns_raw_text_and_metadata(
         "json": {
             "model": "fixed-model",
             "messages": [{"role": "user", "content": "生成下一步行动"}],
+            "thinking": {"type": "disabled"},
             "temperature": 0,
             "max_tokens": 2048,
             "n": 1,
