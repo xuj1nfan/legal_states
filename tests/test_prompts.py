@@ -40,6 +40,7 @@ def test_build_action_prompt_contains_inputs_and_only_allowed_formats(
     assert "只输出一个合法 JSON 对象" in prompt
     assert "不要输出 Markdown、解释或思维链" in prompt
     assert "不得增加额外字段" in prompt
+    assert "事实、知识或阶段性结论" in prompt
 
 
 def test_build_action_prompt_includes_stop_format_and_guidance(
@@ -47,8 +48,9 @@ def test_build_action_prompt_includes_stop_format_and_guidance(
 ) -> None:
     prompt = build_action_prompt("案件", "问题", state, [ActionName.STOP])
     assert '"operation":"STOP"' in prompt
-    assert "当前 LegalState 无需继续更新，可以结束状态构建" in prompt
-    assert "STOP 不生成也不等于最终答案" in prompt
+    assert "当你认为当前 LegalState 已经无需继续更新时" in prompt
+    assert "否则应选择其他允许的操作继续更新状态" in prompt
+    assert "STOP 仅表示结束状态构建，不生成也不等同于最终答案" in prompt
 
 
 def test_build_action_prompt_deduplicates_allowed_operations(state: LegalState) -> None:

@@ -61,7 +61,7 @@ class Relation(_StateObject):
 
 
 class Conclusion(_StateObject):
-    """阶段性结论，支持依据为事实或知识的 ID。"""
+    """阶段性结论，支持依据可为事实、法律知识或已有阶段性结论的 ID。"""
 
     issue_id: str
     content: str = Field(min_length=1)
@@ -98,7 +98,8 @@ class LegalState(_SchemaModel):
         issue_ids = {issue.id for issue in self.issues}
         fact_ids = {fact.id for fact in self.facts}
         knowledge_ids = {item.id for item in self.knowledge}
-        support_ids = fact_ids | knowledge_ids
+        conclusion_ids = {item.id for item in self.conclusions}
+        support_ids = fact_ids | knowledge_ids | conclusion_ids
 
         def check_reference(
             object_id: str, field: str, target: str, allowed_ids: set[str]
@@ -148,6 +149,43 @@ class LegalState(_SchemaModel):
 
         if errors:
             raise ValueError("; ".join(errors))
+        return self
+
+    @model_validator(mode="after")
+    def validate_conclusion_dependencies(self) -> Self:
+        """检查阶段性结论之间的支持依据关系不能形成循环。"""
+        conclusion_ids = {conclusion.id for conclusion in self.conclusions}
+        dependencies = {
+            conclusion.id: [
+                support_id
+                for support_id in conclusion.support
+                if support_id in conclusion_ids
+            ]
+            for conclusion in self.conclusions
+        }
+        completed: set[str] = set()
+        visiting: set[str] = set()
+
+        def visit(conclusion_id: str, path: list[str]) -> None:
+            if conclusion_id in visiting:
+                cycle = path[path.index(conclusion_id) :] + [conclusion_id]
+                raise ValueError(
+                    "Conclusion support cycle detected: " + " -> ".join(cycle)
+                )
+            if conclusion_id in completed:
+                return
+
+            visiting.add(conclusion_id)
+            path.append(conclusion_id)
+            for dependency_id in dependencies[conclusion_id]:
+                visit(dependency_id, path)
+            path.pop()
+            visiting.remove(conclusion_id)
+            completed.add(conclusion_id)
+
+        for conclusion in self.conclusions:
+            visit(conclusion.id, [])
+
         return self
 
     @model_validator(mode="after")

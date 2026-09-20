@@ -22,7 +22,7 @@ _ACTION_FORMATS: dict[ActionName, dict[str, object]] = {
         "operation": "COMMIT",
         "issue_id": "已有争点 ID",
         "conclusion": "阶段性结论",
-        "support": ["已有事实或知识 ID"],
+        "support": ["已有事实、知识或阶段性结论 ID"],
     },
     ActionName.RESOLVE: {
         "operation": "RESOLVE",
@@ -72,8 +72,9 @@ def build_action_prompt(
     stop_instruction = ""
     if ActionName.STOP in operations:
         stop_instruction = (
-            "\n7. 当前 LegalState 无需继续更新，可以结束状态构建；"
-            "STOP 不生成也不等于最终答案。"
+            "\n7. 当你认为当前 LegalState 已经无需继续更新时，可以选择 STOP；"
+            "否则应选择其他允许的操作继续更新状态。STOP 仅表示结束状态构建，"
+            "不生成也不等同于最终答案。"
         )
     formats = "\n".join(
         "- "
@@ -91,7 +92,7 @@ def build_action_prompt(
 2. 只输出一个合法 JSON 对象，不要输出 Markdown、解释或思维链。
 3. JSON 必须严格匹配对应格式，不得增加额外字段，也不得省略必填字段。
 4. issue_id、parent_issue、fact_ids 和 support 中的引用必须使用当前 LegalState 中已有的 ID；EXPAND_ISSUE 的 parent_issue 可以为 null。
-5. BIND_FACT 的 fact_ids 至少包含一个事实 ID；COMMIT 的 support 可以为空数组。
+5. BIND_FACT 的 fact_ids 至少包含一个事实 ID；COMMIT 的 support 可以引用当前 LegalState 中已有的事实、知识或阶段性结论 ID，也可以为空数组。如果当前阶段性结论确实依赖已有阶段性结论，应在 support 中引用对应的 Conclusion ID；不要强行创建结论依赖，只有真实依赖时才引用。
 6. 选择符合当前争点状态及已有结论的行动。{stop_instruction}
 
 允许的 JSON 格式：

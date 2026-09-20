@@ -153,12 +153,27 @@ def test_commit_empty_conclusion(reasoning_state: LegalState) -> None:
         commit(reasoning_state, "I1", "", ["F1"])
 
 
-@pytest.mark.parametrize("target", ["missing", "I1", "A1", "C1"])
+@pytest.mark.parametrize("target", ["missing", "I1", "A1"])
 def test_commit_invalid_support(ready_state: LegalState, target: str) -> None:
     before = ready_state.model_dump()
     with pytest.raises(ValidationError, match="support"):
         commit(ready_state, "I1", "阶段结论", [target])
     assert ready_state.model_dump() == before
+
+
+def test_commit_allows_previous_conclusion_as_support(
+    reasoning_state: LegalState,
+) -> None:
+    first = commit(reasoning_state, "I1", "乙应返还本金", ["F1", "K1"])
+    before = first.model_dump()
+
+    second = commit(first, "I1", "乙还应承担迟延责任", ["C1", "F2", "K1"])
+
+    assert second is not first
+    assert second.conclusions[-1].id == "C2"
+    assert second.conclusions[-1].support == ["C1", "F2", "K1"]
+    assert first.model_dump() == before
+    assert LegalState.model_validate(second.model_dump()) == second
 
 
 def test_commit_requires_reasoning(initial_state: LegalState) -> None:

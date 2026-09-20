@@ -116,7 +116,9 @@ def commit(
     state: LegalState, issue_id: str, conclusion: str, support: list[str]
 ) -> LegalState:
     """为 reasoning 争点新增结论，自动分配 C 前缀的 ID。
-    支持依据只能引用已有事实或知识，也可为空。写入结论后不改变争点状态。
+    支持依据可以引用已有事实、知识或阶段性结论，也可为空。
+    引用合法性和阶段性结论依赖的循环校验由 LegalState schema 负责。
+    写入结论后不改变争点状态。
     """
     candidate = _validated_snapshot(state)
     issue = _find_issue(candidate, issue_id, "COMMIT")

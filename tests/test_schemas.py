@@ -315,7 +315,7 @@ def test_invalid_conclusion_issue(complete_state: LegalState, target: str) -> No
         validate_update(complete_state, conclusions=[conclusion])
 
 
-@pytest.mark.parametrize("target", ["missing", "I1", "A1", "C1", "C2"])
+@pytest.mark.parametrize("target", ["missing", "I1", "A1"])
 def test_invalid_conclusion_support(complete_state: LegalState, target: str) -> None:
     conclusions = [
         Conclusion(id="C1", issue_id="I1", content="阶段结论", support=[target]),
@@ -326,6 +326,61 @@ def test_invalid_conclusion_support(complete_state: LegalState, target: str) -> 
     message = str(error.value)
     assert "Object 'C1' field 'support[0]'" in message
     assert repr(target) in message
+
+
+def test_conclusion_dependency_chain_is_valid(complete_state: LegalState) -> None:
+    conclusions = [
+        Conclusion(id="C1", issue_id="I1", content="基础结论", support=["F1", "K1"]),
+        Conclusion(id="C2", issue_id="I1", content="第二阶段结论", support=["C1"]),
+        Conclusion(id="C3", issue_id="I1", content="第三阶段结论", support=["C2"]),
+    ]
+
+    state = validate_update(complete_state, conclusions=conclusions)
+
+    assert [conclusion.support for conclusion in state.conclusions] == [
+        ["F1", "K1"],
+        ["C1"],
+        ["C2"],
+    ]
+
+
+def test_conclusion_cannot_support_itself(complete_state: LegalState) -> None:
+    with pytest.raises(ValidationError, match="Conclusion support cycle detected"):
+        validate_update(
+            complete_state,
+            conclusions=[
+                Conclusion(id="C1", issue_id="I1", content="阶段结论", support=["C1"])
+            ],
+        )
+
+
+def test_two_node_conclusion_dependency_cycle(complete_state: LegalState) -> None:
+    with pytest.raises(
+        ValidationError,
+        match="Conclusion support cycle detected: C1 -> C2 -> C1",
+    ):
+        validate_update(
+            complete_state,
+            conclusions=[
+                Conclusion(id="C1", issue_id="I1", content="结论一", support=["C2"]),
+                Conclusion(id="C2", issue_id="I1", content="结论二", support=["C1"]),
+            ],
+        )
+
+
+def test_three_node_conclusion_dependency_cycle(complete_state: LegalState) -> None:
+    with pytest.raises(
+        ValidationError,
+        match="Conclusion support cycle detected: C1 -> C2 -> C3 -> C1",
+    ):
+        validate_update(
+            complete_state,
+            conclusions=[
+                Conclusion(id="C1", issue_id="I1", content="结论一", support=["C2"]),
+                Conclusion(id="C2", issue_id="I1", content="结论二", support=["C3"]),
+                Conclusion(id="C3", issue_id="I1", content="结论三", support=["C1"]),
+            ],
+        )
 
 
 def test_empty_references_and_unsupported_conclusion() -> None:
