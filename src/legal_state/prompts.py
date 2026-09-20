@@ -2,7 +2,7 @@ import json
 from collections.abc import Iterable
 
 from legal_state.actions import ActionName
-from legal_state.schemas import LegalState
+from legal_state.schemas import IssueStatus, LegalState
 
 __all__ = ["build_action_prompt"]
 
@@ -50,6 +50,49 @@ def _normalize_operations(
     return operations
 
 
+def _format_operation_targets(
+    state: LegalState, operation: ActionName
+) -> str:
+    if operation is ActionName.EXPAND_ISSUE:
+        issue_ids = ", ".join(issue.id for issue in state.issues)
+        parent_hint = "parent_issue 可为 null"
+        if issue_ids:
+            parent_hint += f" 或已有 issue ID: {issue_ids}"
+        return f"- {operation.value}: 可新增争点；{parent_hint}"
+
+    if operation is ActionName.BIND_FACT:
+        target_ids = (
+            [
+                issue.id
+                for issue in state.issues
+                if issue.status in (IssueStatus.OPEN, IssueStatus.REASONING)
+            ]
+            if state.facts
+            else []
+        )
+    elif operation is ActionName.COMMIT:
+        target_ids = [
+            issue.id
+            for issue in state.issues
+            if issue.status is IssueStatus.REASONING
+        ]
+    elif operation is ActionName.RESOLVE:
+        concluded_issue_ids = {
+            conclusion.issue_id for conclusion in state.conclusions
+        }
+        target_ids = [
+            issue.id
+            for issue in state.issues
+            if issue.status is IssueStatus.REASONING
+            and issue.id in concluded_issue_ids
+        ]
+    else:
+        return f"- {operation.value}: 不需要 issue_id"
+
+    targets = ", ".join(target_ids) or "无合法目标争点"
+    return f"- {operation.value}: {targets}"
+
+
 def build_action_prompt(
     case_text: str,
     question: str,
@@ -83,6 +126,10 @@ def build_action_prompt(
         )
         for operation in operations
     )
+    operation_targets = "\n".join(
+        _format_operation_targets(validated_state, operation)
+        for operation in operations
+    )
 
     return f"""你是法律推理状态的单步行动生成器。
 根据输入数据和当前 LegalState，选择并生成恰好一个允许的行动。
@@ -94,6 +141,9 @@ def build_action_prompt(
 4. issue_id、parent_issue、fact_ids 和 support 中的引用必须使用当前 LegalState 中已有的 ID；EXPAND_ISSUE 的 parent_issue 可以为 null。
 5. BIND_FACT 的 fact_ids 至少包含一个事实 ID；COMMIT 的 support 可以引用当前 LegalState 中已有的事实、知识或阶段性结论 ID，也可以为空数组。如果当前阶段性结论确实依赖已有阶段性结论，应在 support 中引用对应的 Conclusion ID；不要强行创建结论依赖，只有真实依赖时才引用。
 6. 选择符合当前争点状态及已有结论的行动。{stop_instruction}
+
+当前操作可使用的争点目标：
+{operation_targets}
 
 允许的 JSON 格式：
 {formats}

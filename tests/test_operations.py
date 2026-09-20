@@ -176,6 +176,24 @@ def test_commit_allows_previous_conclusion_as_support(
     assert LegalState.model_validate(second.model_dump()) == second
 
 
+def test_commit_allows_cross_issue_conclusion_support(
+    initial_state: LegalState,
+) -> None:
+    i1_reasoning = bind_fact(initial_state, "I1", ["F1"])
+    first = commit(i1_reasoning, "I1", "乙应返还本金", ["F1", "K1"])
+    i2_reasoning = bind_fact(first, "I2", ["F2"])
+    before = i2_reasoning.model_dump()
+
+    second = commit(i2_reasoning, "I2", "乙应支付利息", ["C1", "F2", "K1"])
+
+    assert second.conclusions[0].issue_id == "I1"
+    assert second.conclusions[-1].issue_id == "I2"
+    assert second.conclusions[-1].id == "C2"
+    assert second.conclusions[-1].support == ["C1", "F2", "K1"]
+    assert i2_reasoning.model_dump() == before
+    assert LegalState.model_validate(second.model_dump()) == second
+
+
 def test_commit_requires_reasoning(initial_state: LegalState) -> None:
     with pytest.raises(InvalidTransitionError, match="COMMIT.*open.*reasoning"):
         commit(initial_state, "I1", "阶段结论", ["F1"])
