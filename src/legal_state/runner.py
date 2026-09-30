@@ -28,6 +28,7 @@ __all__ = [
 class TerminationReason(StrEnum):
     STOP = "stop"
     MAX_STEPS = "max_steps"
+    TOKEN_BUDGET = "token_budget"
 
 
 class _RunnerModel(BaseModel):
@@ -48,6 +49,7 @@ class StepRecord(_RunnerModel):
     input_tokens: int = Field(ge=0)
     output_tokens: int = Field(ge=0)
     latency_seconds: float = Field(ge=0)
+    finish_reason: str | None = None
 
 
 class RunResult(_RunnerModel):
@@ -86,6 +88,7 @@ class FailedStepRecord(_RunnerModel):
     latency_seconds: float | None = Field(default=None, ge=0)
     error_type: str = Field(min_length=1)
     error_message: str
+    finish_reason: str | None = None
 
 
 class RunnerStepError(RuntimeError):
@@ -167,6 +170,7 @@ def _failed_step_record(
         ),
         error_type=type(error).__name__,
         error_message=str(error),
+        finish_reason=model_call.finish_reason if model_call is not None else None,
     )
 
 
@@ -176,16 +180,28 @@ def run_legal_state(
     initial_state: LegalState,
     model_client: ModelClient,
     max_steps: int,
+    *,
+    max_reasoning_output_tokens: int | None = None,
 ) -> RunResult:
     """同步执行一个有步数上限的 Legal State loop。"""
     if max_steps <= 0:
         raise ValueError("max_steps must be positive")
+    if max_reasoning_output_tokens is not None and max_reasoning_output_tokens <= 0:
+        raise ValueError("max_reasoning_output_tokens must be positive")
 
     initial_snapshot = _snapshot(initial_state)
     current_state = _snapshot(initial_snapshot)
     completed_steps: list[StepRecord] = []
+    output_tokens = 0
+    termination_reason = TerminationReason.MAX_STEPS
 
     for step_index in range(max_steps):
+        if (
+            max_reasoning_output_tokens is not None
+            and output_tokens >= max_reasoning_output_tokens
+        ):
+            termination_reason = TerminationReason.TOKEN_BUDGET
+            break
         before_state = _snapshot(current_state)
         allowed_operations = determine_allowed_operations(before_state)
         prompt = build_action_prompt(
@@ -196,7 +212,16 @@ def run_legal_state(
         )
 
         try:
-            model_call = model_client.generate(prompt)
+            if max_reasoning_output_tokens is None:
+                model_call = model_client.generate(prompt)
+            else:
+                model_call = model_client.generate(
+                    prompt,
+                    max_output_tokens=min(
+                        model_client.max_output_tokens,
+                        max_reasoning_output_tokens - output_tokens,
+                    ),
+                )
         except Exception as error:
             failed_step = _failed_step_record(
                 step_index=step_index,
@@ -207,6 +232,22 @@ def run_legal_state(
                 error=error,
             )
             raise RunnerStepError(tuple(completed_steps), failed_step) from error
+
+        output_tokens += model_call.output_tokens
+        if model_call.finish_reason == "length":
+            error = ValueError("Model output was truncated (finish_reason=length)")
+            raise RunnerStepError(
+                tuple(completed_steps),
+                _failed_step_record(
+                    step_index=step_index,
+                    stage="model_call",
+                    before_state=before_state,
+                    allowed_operations=allowed_operations,
+                    prompt=prompt,
+                    error=error,
+                    model_call=model_call,
+                ),
+            ) from error
 
         try:
             parsed_action = parse_action_json(model_call.raw_text)
@@ -266,6 +307,7 @@ def run_legal_state(
             input_tokens=model_call.input_tokens,
             output_tokens=model_call.output_tokens,
             latency_seconds=model_call.latency_seconds,
+            finish_reason=model_call.finish_reason,
         )
         completed_steps.append(step)
         current_state = _snapshot(after_state)
@@ -287,6 +329,6 @@ def run_legal_state(
         initial_state=_snapshot(initial_snapshot),
         final_state=_snapshot(current_state),
         steps=tuple(completed_steps),
-        termination_reason=TerminationReason.MAX_STEPS,
+        termination_reason=termination_reason,
         max_steps=max_steps,
     )

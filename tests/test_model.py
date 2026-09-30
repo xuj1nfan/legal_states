@@ -72,6 +72,7 @@ def test_generate_returns_raw_text_and_metadata(
         input_tokens=120,
         output_tokens=8,
         latency_seconds=0.25,
+        finish_reason="stop",
     )
     assert captured == {
         "url": ENDPOINT,

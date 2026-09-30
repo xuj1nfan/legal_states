@@ -16,6 +16,8 @@ class ModelCallResult(BaseModel):
     input_tokens: int = Field(ge=0)
     output_tokens: int = Field(ge=0)
     latency_seconds: float = Field(ge=0)
+    finish_reason: str | None = None
+    reasoning_tokens: int | None = Field(default=None, ge=0)
 
 
 class _ResponseMessage(BaseModel):
@@ -28,6 +30,7 @@ class _ResponseChoice(BaseModel):
     model_config = ConfigDict(extra="ignore", strict=True)
 
     message: _ResponseMessage
+    finish_reason: str | None = None
 
 
 class _ResponseUsage(BaseModel):
@@ -35,6 +38,7 @@ class _ResponseUsage(BaseModel):
 
     prompt_tokens: int = Field(ge=0)
     completion_tokens: int = Field(ge=0)
+    completion_tokens_details: dict[str, int | object] | None = None
 
 
 class _ChatCompletionResponse(BaseModel):
@@ -55,6 +59,9 @@ class ModelClient:
         endpoint: str,
         *,
         timeout_seconds: float = 60.0,
+        temperature: float = 0,
+        max_output_tokens: int = 2048,
+        provider_options: dict[str, object] | None = None,
     ) -> None:
         if not api_key:
             raise ValueError("api_key must not be empty")
@@ -64,16 +71,37 @@ class ModelClient:
             raise ValueError("endpoint must not be empty")
         if timeout_seconds <= 0:
             raise ValueError("timeout_seconds must be positive")
+        if max_output_tokens <= 0:
+            raise ValueError("max_output_tokens must be positive")
+        reserved = {"model", "messages", "temperature", "max_tokens", "n"}
+        if provider_options is not None and reserved.intersection(provider_options):
+            raise ValueError("provider_options cannot override controlled parameters")
 
         self._api_key = api_key
         self._model = model
         self._endpoint = endpoint
         self._timeout_seconds = timeout_seconds
+        self._temperature = temperature
+        self.max_output_tokens = max_output_tokens
+        self._provider_options = (
+            {"thinking": {"type": "disabled"}}
+            if provider_options is None
+            else dict(provider_options)
+        )
+        self.last_response: str | None = None
 
-    def generate(self, prompt: str) -> ModelCallResult:
+    def generate(
+        self, prompt: str, *, max_output_tokens: int | None = None
+    ) -> ModelCallResult:
         """发送一次请求；不解析、修复或重试模型生成的文本。"""
         if not prompt:
             raise ValueError("prompt must not be empty")
+        limit = (
+            self.max_output_tokens if max_output_tokens is None else max_output_tokens
+        )
+        if limit <= 0:
+            raise ValueError("max_output_tokens must be positive")
+        self.last_response = None
 
         started_at = time.perf_counter()
         response = httpx.post(
@@ -85,13 +113,14 @@ class ModelClient:
             json={
                 "model": self._model,
                 "messages": [{"role": "user", "content": prompt}],
-                "thinking": {"type":"disabled"},
-                "temperature": 0,
-                "max_tokens": 2048,
+                **self._provider_options,
+                "temperature": self._temperature,
+                "max_tokens": limit,
                 "n": 1,
             },
             timeout=self._timeout_seconds,
         )
+        self.last_response = response.text
         response.raise_for_status()
         payload = _ChatCompletionResponse.model_validate_json(response.content)
         latency_seconds = time.perf_counter() - started_at
@@ -102,4 +131,8 @@ class ModelClient:
             input_tokens=payload.usage.prompt_tokens,
             output_tokens=payload.usage.completion_tokens,
             latency_seconds=latency_seconds,
+            finish_reason=payload.choices[0].finish_reason,
+            reasoning_tokens=(
+                (payload.usage.completion_tokens_details or {}).get("reasoning_tokens")
+            ),
         )

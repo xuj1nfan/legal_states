@@ -1,12 +1,19 @@
 .env
 .env.*
 !.env.example
-
+AGENTS.md
 __pycache__/
 *.py[cod]
 .pytest_cache/
 
 .venv/
+
+# External datasets, model outputs and private review mappings.
+third_party/
+data/
+runs/
+.ruff_cache/
+dist/
 
 Legal_State_Pilot_v0.1.md
 research plan-3.pdf

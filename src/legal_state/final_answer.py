@@ -35,6 +35,7 @@ class FinalAnswerResult(BaseModel):
     input_tokens: int = Field(ge=0)
     output_tokens: int = Field(ge=0)
     latency_seconds: float = Field(ge=0)
+    finish_reason: str | None = None
 
 
 FinalAnswerFailureStage = Literal["model_call", "parse_final_answer"]
@@ -67,6 +68,8 @@ def build_final_answer_prompt(
     question: str,
     provided_knowledge: tuple[str, ...],
     reasoning_artifact: str,
+    *,
+    answer_format: Literal["free_text", "single_choice"] = "free_text",
 ) -> str:
     """将统一最终答案生成器的输入组装为稳定的 prompt。"""
     input_json = json.dumps(
@@ -81,6 +84,14 @@ def build_final_answer_prompt(
         sort_keys=True,
     )
 
+    if answer_format not in ("free_text", "single_choice"):
+        raise ValueError("Unsupported answer_format")
+    choice_instruction = (
+        "\n9. 本题为单选题。answer 只能为 A、B、C、D 或 UNKNOWN。"
+        "只转写记录中支持的选项；记录不足以支持明确选择时输出 UNKNOWN，不猜测。\n"
+        if answer_format == "single_choice"
+        else ""
+    )
     return f"""你是统一的最终答案生成器。
 
 输入包含原始案件、原始问题、给定法律知识，以及上游产生的推理记录。
@@ -96,6 +107,7 @@ def build_final_answer_prompt(
 7. 只输出严格 JSON，格式必须为：
    {{"answer":"最终答案"}}
 8. 不得输出 Markdown、解释、思维链或额外字段。
+{choice_instruction}
 
 输入数据：
 {input_json}
@@ -116,6 +128,7 @@ def generate_final_answer(
     provided_knowledge: tuple[str, ...],
     reasoning_artifact: str,
     model_client: ModelClient,
+    answer_format: Literal["free_text", "single_choice"] = "free_text",
 ) -> FinalAnswerResult:
     """调用一次模型并严格解析统一最终答案。"""
     prompt = build_final_answer_prompt(
@@ -123,6 +136,7 @@ def generate_final_answer(
         question,
         provided_knowledge,
         reasoning_artifact,
+        answer_format=answer_format,
     )
 
     try:
@@ -135,7 +149,17 @@ def generate_final_answer(
         ) from error
 
     try:
+        if model_call.finish_reason == "length":
+            raise ValueError("Final answer was truncated (finish_reason=length)")
         parsed_answer = parse_final_answer_json(model_call.raw_text)
+        if answer_format == "single_choice" and parsed_answer.answer not in (
+            "A",
+            "B",
+            "C",
+            "D",
+            "UNKNOWN",
+        ):
+            raise ValueError("Single-choice answer must be A, B, C, D, or UNKNOWN")
     except Exception as error:
         raise FinalAnswerError(
             stage="parse_final_answer",
@@ -152,4 +176,5 @@ def generate_final_answer(
         input_tokens=model_call.input_tokens,
         output_tokens=model_call.output_tokens,
         latency_seconds=model_call.latency_seconds,
+        finish_reason=model_call.finish_reason,
     )
