@@ -1,0 +1,33 @@
+experiment_id: lawbench_3_6_qwen35_9b_local_v1
+task_id: "3-6"
+seed: 20260930
+methods: [cot, generic, legal_state]
+knowledge_mode: closed_book
+data_dir: data/processed/lawbench_3_6
+runs_dir: runs
+upstream_dir: third_party/LawBench
+
+model:
+  name_env: LSP_MODEL
+  endpoint_env: LSP_ENDPOINT
+  api_key_env: LSP_API_KEY
+  temperature: 0
+  timeout_seconds: 180
+  # Qwen's documented vLLM switch; verified with reasoning_tokens=0.
+  provider_options:
+    chat_template_kwargs:
+      enable_thinking: false
+  hidden_reasoning_disabled: true
+
+reasoning:
+  max_steps: 24
+  max_output_tokens_per_call: 512
+  max_output_tokens_total: 8192
+
+final_answer:
+  max_output_tokens: 128
+
+execution:
+  concurrency: 1
+  automatic_retries: 0
+  repetitions: 1
