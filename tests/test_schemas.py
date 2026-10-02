@@ -77,7 +77,8 @@ def test_default_lists_are_independent() -> None:
     first = LegalState()
     second = LegalState()
     for field in LegalState.model_fields:
-        assert getattr(first, field) is not getattr(second, field)
+        if isinstance(getattr(first, field), list):
+            assert getattr(first, field) is not getattr(second, field)
     first.issues.append(Issue(id="I1", question="借款合同是否成立"))
     assert second.issues == []
 
@@ -449,6 +450,9 @@ def test_json_schema() -> None:
         "knowledge",
         "relations",
         "conclusions",
+        "option_assessments",
+        "option_decision",
+        "draft_reasoning",
     }
     assert schema["$defs"]["IssueStatus"]["enum"] == ["open", "reasoning", "resolved"]
     assert schema["additionalProperties"] is False

@@ -91,7 +91,11 @@ class ModelClient:
         self.last_response: str | None = None
 
     def generate(
-        self, prompt: str, *, max_output_tokens: int | None = None
+        self,
+        prompt: str,
+        *,
+        max_output_tokens: int | None = None,
+        response_format: dict[str, object] | None = None,
     ) -> ModelCallResult:
         """发送一次请求；不解析、修复或重试模型生成的文本。"""
         if not prompt:
@@ -114,6 +118,7 @@ class ModelClient:
                 "model": self._model,
                 "messages": [{"role": "user", "content": prompt}],
                 **self._provider_options,
+                **({"response_format": response_format} if response_format is not None else {}),
                 "temperature": self._temperature,
                 "max_tokens": limit,
                 "n": 1,

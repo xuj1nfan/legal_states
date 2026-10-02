@@ -9,6 +9,26 @@ from legal_state.model import ModelCallResult, ModelClient
 ENDPOINT = "https://model.example.test/v1/chat/completions"
 
 
+def test_response_schema_is_sent_per_call_and_does_not_repair_output(monkeypatch):
+    payloads = []
+
+    def fake_post(url, *, headers, json, timeout):
+        payloads.append(json)
+        return make_response(valid_response("{incomplete"))
+
+    monkeypatch.setattr(httpx, "post", fake_post)
+    client = ModelClient("fixture-key", "fixture-model", ENDPOINT)
+    response_format = {"type": "json_schema", "json_schema": {
+        "name": "action", "schema": {"type": "object"},
+    }}
+    result = client.generate("JSON", response_format=response_format, max_output_tokens=512)
+    assert result.raw_text == "{incomplete"
+    assert payloads[0]["response_format"] == response_format
+    assert payloads[0]["max_tokens"] == 512
+    client.generate("text")
+    assert "response_format" not in payloads[1]
+
+
 def make_response(payload: dict[str, object], status_code: int = 200) -> httpx.Response:
     request = httpx.Request("POST", ENDPOINT)
     return httpx.Response(status_code, request=request, json=payload)

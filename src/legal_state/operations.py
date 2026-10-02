@@ -9,12 +9,12 @@ from legal_state.schemas import (
 )
 
 __all__ = [
-    "StateOperationError",
-    "IssueNotFoundError",
     "InvalidTransitionError",
-    "expand_issue",
+    "IssueNotFoundError",
+    "StateOperationError",
     "bind_fact",
     "commit",
+    "expand_issue",
     "resolve",
 ]
 
@@ -59,9 +59,7 @@ def _find_issue(state: LegalState, issue_id: str, operation: str) -> Issue:
     raise IssueNotFoundError(f"{operation}: issue {issue_id!r} does not exist")
 
 
-def _require_status(
-    issue: Issue, operation: str, *allowed: IssueStatus
-) -> None:
+def _require_status(issue: Issue, operation: str, *allowed: IssueStatus) -> None:
     if issue.status not in allowed:
         expected = ", ".join(status.value for status in allowed)
         raise InvalidTransitionError(
@@ -71,19 +69,26 @@ def _require_status(
 
 
 def expand_issue(
-    state: LegalState, question: str, parent_issue: str | None = None
+    state: LegalState,
+    question: str,
+    parent_issue: str | None = None,
+    *,
+    scope: str | None = None,
 ) -> LegalState:
     """新增 open 争点，自动分配 I 前缀的 ID。
     指定的父争点必须存在；父争点保持原状态，即使它已经解决。
     """
     candidate = _validated_snapshot(state)
     if parent_issue is not None:
-        _find_issue(candidate, parent_issue, "EXPAND_ISSUE")
+        parent = _find_issue(candidate, parent_issue, "EXPAND_ISSUE")
+        if scope is None:
+            scope = parent.scope
     candidate.issues.append(
         Issue(
             id=_next_id(candidate, "I"),
             question=question,
             parent_issue=parent_issue,
+            scope=scope,
         )
     )
     return _validated_snapshot(candidate)
@@ -140,8 +145,6 @@ def resolve(state: LegalState, issue_id: str) -> LegalState:
     issue = _find_issue(candidate, issue_id, "RESOLVE")
     _require_status(issue, "RESOLVE", IssueStatus.REASONING)
     if not any(item.issue_id == issue_id for item in candidate.conclusions):
-        raise InvalidTransitionError(
-            f"RESOLVE: issue {issue_id!r} has no conclusion"
-        )
+        raise InvalidTransitionError(f"RESOLVE: issue {issue_id!r} has no conclusion")
     issue.status = IssueStatus.RESOLVED
     return _validated_snapshot(candidate)

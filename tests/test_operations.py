@@ -338,6 +338,9 @@ def test_operations_return_independent_validated_snapshots(
     for field in LegalState.model_fields:
         original_items = getattr(ready_state, field)
         result_items = getattr(result, field)
+        if original_items is None:
+            assert result_items is None
+            continue
         assert original_items is not result_items
         for original, updated in zip(original_items, result_items):
             assert original is not updated

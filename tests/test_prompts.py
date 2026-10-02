@@ -4,8 +4,17 @@ import pytest
 from pydantic import ValidationError
 
 from legal_state.actions import ActionName
+from legal_state.operations import commit
 from legal_state.prompts import build_action_prompt
-from legal_state.schemas import Conclusion, Fact, Issue, IssueStatus, LegalState
+from legal_state.schemas import (
+    Conclusion,
+    Fact,
+    Issue,
+    IssueStatus,
+    Knowledge,
+    LegalState,
+    Relation,
+)
 
 
 @pytest.fixture
@@ -73,9 +82,9 @@ def test_build_action_prompt_revalidates_mutated_state(state: LegalState) -> Non
 
 
 def _target_section(prompt: str) -> str:
-    return prompt.split(
-        "当前操作可使用的争点目标：\n", maxsplit=1
-    )[1].split("\n\n允许的 JSON 格式：", maxsplit=1)[0]
+    return prompt.split("当前操作可使用的争点目标：\n", maxsplit=1)[1].split(
+        "\n\n允许的 JSON 格式：", maxsplit=1
+    )[0]
 
 
 def test_build_action_prompt_lists_targets_for_each_operation() -> None:
@@ -110,14 +119,25 @@ def test_build_action_prompt_lists_targets_for_each_operation() -> None:
     assert "- BIND_FACT: I1, I2" in target_lines
     assert "- COMMIT: I1" in target_lines
     assert "- RESOLVE: I1" in target_lines
-    assert "- EXPAND_ISSUE: 可新增争点；parent_issue 可为 null 或已有 issue ID: I1, I2, I3" in target_lines
+    assert (
+        "- EXPAND_ISSUE: 可新增争点；parent_issue 可为 null 或已有 issue ID: I1, I2, I3"
+        in target_lines
+    )
     assert "- STOP: 不需要 issue_id" in target_lines
-    assert "I3" not in next(line for line in target_lines if line.startswith("- BIND_FACT:"))
-    assert "I3" not in next(line for line in target_lines if line.startswith("- COMMIT:"))
-    assert "I3" not in next(line for line in target_lines if line.startswith("- RESOLVE:"))
+    assert "I3" not in next(
+        line for line in target_lines if line.startswith("- BIND_FACT:")
+    )
+    assert "I3" not in next(
+        line for line in target_lines if line.startswith("- COMMIT:")
+    )
+    assert "I3" not in next(
+        line for line in target_lines if line.startswith("- RESOLVE:")
+    )
 
 
-def test_build_action_prompt_excludes_reasoning_issue_without_conclusion_from_resolve() -> None:
+def test_build_action_prompt_excludes_reasoning_issue_without_conclusion_from_resolve() -> (
+    None
+):
     state = LegalState(
         issues=[Issue(id="I1", question="争点", status=IssueStatus.REASONING)],
         facts=[Fact(id="F1", content="事实", source="case")],
@@ -147,8 +167,57 @@ def test_build_action_prompt_lists_only_allowed_operation_targets(
 def test_build_action_prompt_shows_no_bind_target_without_facts() -> None:
     state = LegalState(issues=[Issue(id="I1", question="争点")])
 
-    targets = _target_section(
-        build_action_prompt("案件", "问题", state, ["BIND_FACT"])
-    )
+    targets = _target_section(build_action_prompt("案件", "问题", state, ["BIND_FACT"]))
 
     assert targets == "- BIND_FACT: 无合法目标争点"
+
+
+def _reference_section(prompt: str) -> dict[str, list[str | None]]:
+    section = prompt.split("当前引用白名单", maxsplit=1)[1]
+    return json.loads(section.split("\n", maxsplit=1)[1].split("\n\n", maxsplit=1)[0])
+
+
+def test_reference_whitelists_follow_object_types_and_state_transitions() -> None:
+    # IDs are arbitrary strings: field membership, rather than a prefix, determines type.
+    state = LegalState(
+        issues=[Issue(id="I1", question="争点", status=IssueStatus.REASONING)],
+        facts=[Fact(id="source-fact", content="事实", source="case")],
+        knowledge=[Knowledge(id="K1", content="规则", source="provided")],
+        relations=[
+            Relation(
+                id="A1",
+                issue_id="I1",
+                fact_ids=["source-fact"],
+                knowledge_ids=[],
+                description="绑定",
+            )
+        ],
+    )
+    snapshot = state.model_dump(mode="json")
+    references = _reference_section(
+        build_action_prompt("案件", "问题", state, ["COMMIT", "RESOLVE", "STOP"])
+    )
+    assert references == {
+        "EXPAND_ISSUE.parent_issue": [None, "I1"],
+        "BIND_FACT.fact_ids": ["source-fact"],
+        "COMMIT.support": ["source-fact", "K1"],
+    }
+
+    updated = commit(state, "I1", "阶段性结论", ["source-fact", "K1"])
+    updated_references = _reference_section(
+        build_action_prompt("案件", "问题", updated, ["COMMIT", "RESOLVE", "STOP"])
+    )
+    assert updated_references["COMMIT.support"] == ["source-fact", "K1", "C1"]
+    assert updated_references["BIND_FACT.fact_ids"] == ["source-fact"]
+    assert state.model_dump(mode="json") == snapshot
+
+
+def test_reference_whitelists_do_not_invent_ids_in_empty_state() -> None:
+    references = _reference_section(
+        build_action_prompt("案件", "问题", LegalState(), ["EXPAND_ISSUE", "STOP"])
+    )
+    assert references == {
+        "EXPAND_ISSUE.parent_issue": [None],
+        "BIND_FACT.fact_ids": [],
+        "COMMIT.support": [],
+    }

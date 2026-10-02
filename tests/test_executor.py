@@ -119,7 +119,8 @@ def test_apply_stop_returns_equal_independent_snapshot(
     assert result == initial_state
     assert result is not initial_state
     for field in LegalState.model_fields:
-        assert getattr(result, field) is not getattr(initial_state, field)
+        if getattr(initial_state, field) is not None:
+            assert getattr(result, field) is not getattr(initial_state, field)
 
 
 def test_apply_stop_allows_open_issues(initial_state: LegalState) -> None:

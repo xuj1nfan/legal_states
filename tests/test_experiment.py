@@ -91,6 +91,68 @@ class FullClient:
         return call("条件成立，因此选 A。\n[STOP]")
 
 
+@pytest.mark.parametrize(
+    "variant,expected_facts", [("stem_only", 1), ("scoped_options", 5)]
+)
+def test_material_variant_runs_through_engine_without_gold(
+    experiment, variant, expected_facts
+):
+    from legal_state.experiment.data import load_cases
+
+    root, config, _ = experiment
+    config.legal_state_materials = variant
+    base = FullClient()
+    client = JournalClient(base, config, root / f"{variant}.jsonl", "fixture-model")
+    record = run_case(
+        next(iter(load_cases(root / "data").values())), "legal_state", config, client
+    )
+    assert record["status"] == "completed"
+    assert len(record["initial_state"]["facts"]) == expected_facts
+    assert record["final_answer"] == "A"
+    assert record["final_state"]["facts"] == record["initial_state"]["facts"]
+
+
+def test_scoped_reference_failure_is_recorded_without_repair_or_retry(experiment):
+    from legal_state.experiment.data import load_cases
+
+    root, config, _ = experiment
+    config.legal_state_materials = "scoped_options"
+    base = ScriptedClient(
+        [
+            call('{"operation":"EXPAND_ISSUE","question":"判断 A","scope":"A"}'),
+            call('{"operation":"BIND_FACT","issue_id":"I1","fact_ids":["F3"]}'),
+        ]
+    )
+    client = JournalClient(base, config, root / "scope_failure.jsonl", "fixture-model")
+    record = run_case(
+        next(iter(load_cases(root / "data").values())), "legal_state", config, client
+    )
+    assert record["status"] == "failed"
+    assert record["failure"]["stage"] == "apply_action"
+    assert "crosses option scopes" in record["failure"]["error_message"]
+    assert len(record["initial_state"]["facts"]) == 5
+    assert not record["failed_step"]["before_state"]["relations"]
+    assert len(base.requests) == 2
+    assert record["final_answer"] is None
+
+
+def test_sequential_workflow_runs_through_experiment_engine(experiment):
+    from legal_state.experiment.data import load_cases
+
+    root, config, _ = experiment
+    config.legal_state_workflow = "sequential"
+    client = JournalClient(
+        FullClient(), config, root / "sequential.jsonl", "fixture-model"
+    )
+    record = run_case(
+        next(iter(load_cases(root / "data").values())), "legal_state", config, client
+    )
+    assert record["status"] == "completed"
+    assert record["termination_reason"] == "stop"
+    assert len(record["steps"]) == 5
+    assert len(record["initial_state"]["facts"]) == 1
+
+
 @pytest.fixture
 def experiment(tmp_path, monkeypatch):
     source = tmp_path / "source.json"

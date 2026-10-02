@@ -66,6 +66,18 @@ class ExperimentConfig(Settings):
         default_factory=lambda: ["cot", "generic", "legal_state"]
     )
     knowledge_mode: Literal["closed_book"] = "closed_book"
+    legal_state_materials: Literal["stem_only", "scoped_options"] = Field(
+        default="stem_only", exclude_if=lambda value: value == "stem_only"
+    )
+    legal_state_workflow: Literal["free", "sequential", "verified"] = Field(
+        default="free", exclude_if=lambda value: value == "free"
+    )
+    legal_state_constrained_json: bool = Field(
+        default=False, exclude_if=lambda value: not value
+    )
+    legal_state_initial_analysis: Literal["none", "cot"] = Field(
+        default="none", exclude_if=lambda value: value == "none"
+    )
     data_dir: str = "data/processed/lawbench_3_6"
     runs_dir: str = "runs"
     upstream_dir: str = "third_party/LawBench"
@@ -76,6 +88,12 @@ class ExperimentConfig(Settings):
 
     @model_validator(mode="after")
     def validate_methods(self):
+        if self.legal_state_initial_analysis == "cot" and self.legal_state_workflow != "verified":
+            raise ValueError("Initial CoT analysis is available for the verified workflow")
+        if self.legal_state_constrained_json and self.legal_state_workflow != "verified":
+            raise ValueError("Constrained JSON is available for the verified workflow")
+        if self.legal_state_workflow == "verified" and self.legal_state_materials != "scoped_options":
+            raise ValueError("Verified workflow requires scoped_options materials")
         if len(self.methods) != 3 or set(self.methods) != {
             "cot",
             "generic",

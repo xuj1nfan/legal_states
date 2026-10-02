@@ -9,6 +9,11 @@ from legal_state.actions import (
     StopAction,
     parse_action_json,
 )
+from legal_state.assessment import (
+    assessment_response_format,
+    build_assessment_prompt,
+    next_option,
+)
 from legal_state.executor import apply_action
 from legal_state.model import ModelCallResult, ModelClient
 from legal_state.prompts import build_action_prompt
@@ -112,9 +117,41 @@ def _snapshot(state: LegalState) -> LegalState:
     return LegalState.model_validate(state.model_dump())
 
 
-def determine_allowed_operations(state: LegalState) -> tuple[ActionName, ...]:
+def determine_allowed_operations(
+    state: LegalState, *, workflow: Literal["free", "sequential", "verified"] = "free"
+) -> tuple[ActionName, ...]:
     """返回结构上可执行的操作，不判断法律上的合理性。"""
     validated_state = _snapshot(state)
+    if workflow not in ("free", "sequential", "verified"):
+        raise ValueError("Unknown Legal State workflow")
+    if workflow == "verified":
+        if validated_state.option_decision:
+            return (ActionName.STOP,)
+        if next_option(validated_state) is not None:
+            return (ActionName.ASSESS_OPTION,)
+        return (ActionName.AUDIT_OPTIONS,)
+    if workflow == "sequential":
+        focus = next(
+            (
+                issue
+                for issue in validated_state.issues
+                if issue.status is not IssueStatus.RESOLVED
+            ),
+            None,
+        )
+        if focus is None:
+            return (
+                (ActionName.EXPAND_ISSUE, ActionName.STOP)
+                if validated_state.conclusions
+                else (ActionName.EXPAND_ISSUE,)
+            )
+        if focus.status is IssueStatus.OPEN:
+            if not validated_state.facts:
+                raise ValueError("Sequential workflow needs material for an open issue")
+            return (ActionName.BIND_FACT,)
+        if any(c.issue_id == focus.id for c in validated_state.conclusions):
+            return (ActionName.RESOLVE,)
+        return (ActionName.COMMIT,)
     operations = [ActionName.EXPAND_ISSUE]
 
     actionable_issues = [
@@ -182,6 +219,8 @@ def run_legal_state(
     max_steps: int,
     *,
     max_reasoning_output_tokens: int | None = None,
+    workflow: Literal["free", "sequential", "verified"] = "free",
+    constrained_json: bool = False,
 ) -> RunResult:
     """同步执行一个有步数上限的 Legal State loop。"""
     if max_steps <= 0:
@@ -203,17 +242,40 @@ def run_legal_state(
             termination_reason = TerminationReason.TOKEN_BUDGET
             break
         before_state = _snapshot(current_state)
-        allowed_operations = determine_allowed_operations(before_state)
-        prompt = build_action_prompt(
-            case_text,
-            question,
-            before_state,
-            allowed_operations,
+        allowed_operations = determine_allowed_operations(
+            before_state, workflow=workflow
+        )
+        focus_issue_id = None
+        if workflow == "sequential":
+            focus_issue_id = next(
+                (
+                    issue.id
+                    for issue in before_state.issues
+                    if issue.status is not IssueStatus.RESOLVED
+                ),
+                None,
+            )
+        prompt = (
+            build_assessment_prompt(question, before_state)
+            if workflow == "verified"
+            else build_action_prompt(
+                case_text,
+                question,
+                before_state,
+                allowed_operations,
+                focus_issue_id=focus_issue_id,
+            )
+        )
+
+        format_options = (
+            {"response_format": assessment_response_format(before_state)}
+            if workflow == "verified" and constrained_json
+            else {}
         )
 
         try:
             if max_reasoning_output_tokens is None:
-                model_call = model_client.generate(prompt)
+                model_call = model_client.generate(prompt, **format_options)
             else:
                 model_call = model_client.generate(
                     prompt,
@@ -221,6 +283,7 @@ def run_legal_state(
                         model_client.max_output_tokens,
                         max_reasoning_output_tokens - output_tokens,
                     ),
+                    **format_options,
                 )
         except Exception as error:
             failed_step = _failed_step_record(
@@ -263,11 +326,15 @@ def run_legal_state(
             )
             raise RunnerStepError(tuple(completed_steps), failed_step) from error
 
-        if parsed_action.operation not in allowed_operations:
-            error = ValueError(
-                f"Action {parsed_action.operation.value!r} is not allowed "
-                "for the current state"
-            )
+        wrong_target = (
+            focus_issue_id is not None
+            and getattr(parsed_action, "issue_id", None) != focus_issue_id
+        )
+        if parsed_action.operation not in allowed_operations or wrong_target:
+            message = f"Action {parsed_action.operation.value!r} is not allowed for the current state"
+            if wrong_target:
+                message += f"; expected issue target {focus_issue_id!r}"
+            error = ValueError(message)
             failed_step = _failed_step_record(
                 step_index=step_index,
                 stage="check_allowed_operation",

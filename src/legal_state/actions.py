@@ -3,9 +3,13 @@ from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
 
+from legal_state.schemas import OptionAssessment, OptionDecision
+
 __all__ = [
     "Action",
     "ActionName",
+    "AssessOptionAction",
+    "AuditOptionsAction",
     "BindFactAction",
     "CommitAction",
     "ExpandIssueAction",
@@ -21,6 +25,8 @@ class ActionName(StrEnum):
     COMMIT = "COMMIT"
     RESOLVE = "RESOLVE"
     STOP = "STOP"
+    ASSESS_OPTION = "ASSESS_OPTION"
+    AUDIT_OPTIONS = "AUDIT_OPTIONS"
 
 
 class _ActionModel(BaseModel):
@@ -31,6 +37,9 @@ class ExpandIssueAction(_ActionModel):
     operation: Literal[ActionName.EXPAND_ISSUE]
     question: str = Field(min_length=1)
     parent_issue: str | None = None
+    scope: str | None = Field(
+        default=None, min_length=1, exclude_if=lambda value: value is None
+    )
 
 
 class BindFactAction(_ActionModel):
@@ -55,12 +64,19 @@ class StopAction(_ActionModel):
     operation: Literal[ActionName.STOP]
 
 
+class AssessOptionAction(_ActionModel):
+    operation: Literal[ActionName.ASSESS_OPTION]
+    assessment: OptionAssessment
+
+
+class AuditOptionsAction(_ActionModel):
+    operation: Literal[ActionName.AUDIT_OPTIONS]
+    decision: OptionDecision
+
+
 Action = Annotated[
-    ExpandIssueAction
-    | BindFactAction
-    | CommitAction
-    | ResolveAction
-    | StopAction,
+    ExpandIssueAction | BindFactAction | CommitAction | ResolveAction | StopAction
+    | AssessOptionAction | AuditOptionsAction,
     Field(discriminator="operation"),
 ]
 

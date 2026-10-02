@@ -67,8 +67,24 @@ def preflight(config: ExperimentConfig, root: Path, client=None) -> dict:
     }
     destination = root / config.runs_dir / "preflight" / f"{digest(key)}.json"
     try:
+        format_options = {}
+        if config.legal_state_constrained_json:
+            format_options["response_format"] = {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "preflight_answer",
+                    "schema": {
+                        "type": "object",
+                        "properties": {"answer": {"type": "string", "enum": ["A"]}},
+                        "required": ["answer"],
+                        "additionalProperties": False,
+                    },
+                },
+            }
         result = client.generate(
-            '只输出严格 JSON：{"answer":"A"}。', max_output_tokens=128
+            '只输出严格 JSON：{"answer":"A"}。',
+            max_output_tokens=128,
+            **format_options,
         )
         report.update(
             returned_model=result.model,
