@@ -60,7 +60,8 @@ class ExecutionSettings(Settings):
 
 class ExperimentConfig(Settings):
     experiment_id: str = Field(default="lawbench_3_6_v1", pattern=r"^[A-Za-z0-9_-]+$")
-    task_id: Literal["3-6"] = "3-6"
+    benchmark: Literal["lawbench_3_6", "mslr"] = "lawbench_3_6"
+    task_id: Literal["3-6", "task2"] = "3-6"
     seed: int = 20260930
     methods: list[Literal["cot", "generic", "legal_state"]] = Field(
         default_factory=lambda: ["cot", "generic", "legal_state"]
@@ -75,8 +76,21 @@ class ExperimentConfig(Settings):
     legal_state_constrained_json: bool = Field(
         default=False, exclude_if=lambda value: not value
     )
-    legal_state_initial_analysis: Literal["none", "cot"] = Field(
+    legal_state_initial_analysis: Literal["none", "cot", "rules"] = Field(
         default="none", exclude_if=lambda value: value == "none"
+    )
+    legal_state_question_frame: bool = Field(
+        default=False, exclude_if=lambda value: not value
+    )
+    # Compile schema requests to an explicit compact grammar for vLLM.
+    legal_state_compact_json: bool = Field(
+        default=False, exclude_if=lambda value: not value
+    )
+    legal_state_compact_json_scope: Literal["all", "audit"] = Field(
+        default="all", exclude_if=lambda value: value == "all"
+    )
+    legal_state_compare_options: bool = Field(
+        default=False, exclude_if=lambda value: not value
     )
     data_dir: str = "data/processed/lawbench_3_6"
     runs_dir: str = "runs"
@@ -88,10 +102,33 @@ class ExperimentConfig(Settings):
 
     @model_validator(mode="after")
     def validate_methods(self):
-        if self.legal_state_initial_analysis == "cot" and self.legal_state_workflow != "verified":
-            raise ValueError("Initial CoT analysis is available for the verified workflow")
-        if self.legal_state_constrained_json and self.legal_state_workflow != "verified":
-            raise ValueError("Constrained JSON is available for the verified workflow")
+        if self.benchmark == "mslr" and self.task_id != "task2":
+            raise ValueError("MSLR uses task_id=task2")
+        if self.benchmark == "lawbench_3_6" and self.task_id != "3-6":
+            raise ValueError("LawBench uses task_id=3-6")
+        if self.benchmark == "mslr" and self.legal_state_materials != "stem_only":
+            raise ValueError("MSLR has no answer options; use stem_only materials")
+        if self.benchmark == "mslr" and (
+            self.legal_state_question_frame or self.legal_state_compare_options
+        ):
+            raise ValueError("Option framing and comparison are unavailable for MSLR")
+        if self.legal_state_compare_options and self.legal_state_workflow != "verified":
+            raise ValueError("Option comparison requires the verified workflow")
+        if self.legal_state_compact_json_scope == "audit" and not self.legal_state_compact_json:
+            raise ValueError("Compact audit scope requires compact JSON")
+        if self.legal_state_compact_json and not self.legal_state_constrained_json:
+            raise ValueError("Compact JSON requires constrained JSON")
+        if self.legal_state_question_frame and self.legal_state_workflow != "verified":
+            raise ValueError("Question framing requires the verified workflow")
+        if self.legal_state_initial_analysis != "none" and self.legal_state_workflow != "verified":
+            raise ValueError("Initial CoT analysis or rule recall is available for the verified workflow")
+        if self.legal_state_constrained_json and self.legal_state_workflow not in {
+            "verified",
+            "sequential",
+        }:
+            raise ValueError(
+                "Constrained JSON requires verified workflow or sequential workflow"
+            )
         if self.legal_state_workflow == "verified" and self.legal_state_materials != "scoped_options":
             raise ValueError("Verified workflow requires scoped_options materials")
         if len(self.methods) != 3 or set(self.methods) != {
@@ -139,4 +176,6 @@ def create_client(config: ExperimentConfig) -> ModelClient:
         temperature=config.model.temperature,
         max_output_tokens=config.reasoning.max_output_tokens_per_call,
         provider_options=config.model.provider_options,
+        compact_json=config.legal_state_compact_json,
+        compact_json_scope=config.legal_state_compact_json_scope,
     )

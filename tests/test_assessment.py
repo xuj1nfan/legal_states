@@ -7,7 +7,8 @@ from pydantic import ValidationError
 
 from legal_state.actions import ActionName, parse_action_json
 from legal_state.assessment import (
-    assess_option, audit_options, build_assessment_prompt, material_date_intervals,
+    assess_option, assessment_response_format, audit_options,
+    build_assessment_prompt, material_date_intervals,
 )
 from legal_state.executor import apply_action
 from legal_state.experiment.config import ExperimentConfig, ReasoningSettings
@@ -125,9 +126,12 @@ class Client:
 
 
 def actions():
+    audited = decision().model_dump()
+    for review in audited["reviews"]:
+        review["verdict"] = "meets_question" if review["option"] == "D" else "does_not_meet"
     return [*[{"operation": "ASSESS_OPTION", "assessment": assessment(l).model_dump()}
               for l in "ABCD"],
-            {"operation": "AUDIT_OPTIONS", "decision": decision().model_dump()},
+            {"operation": "AUDIT_OPTIONS", "decision": audited},
             {"operation": "STOP"}]
 
 
@@ -232,11 +236,64 @@ def test_constrained_json_requires_verified_workflow():
         ExperimentConfig(legal_state_constrained_json=True)
 
 
-def test_audit_prompt_keeps_reasoning_without_initial_verdict_labels(state):
+def test_audit_prompt_preserves_initial_reasoning_and_declared_verdicts(state):
     prompt = build_assessment_prompt("原题", covered(state))
     data = json.loads(prompt.split("输入数据：\n")[1])
     assert len(data["initial_assessments"]) == 4
-    assert all("verdict" not in item for item in data["initial_assessments"])
+    assert all(item["verdict"] == "meets_question" for item in data["initial_assessments"])
+
+
+@pytest.mark.parametrize("candidates,answer", [
+    (["C"], "C"), ([], "UNKNOWN"), (["A", "D"], "UNKNOWN"),
+])
+def test_audit_selection_matches_explicit_reviews_and_keeps_legacy_decisions(candidates, answer):
+    reviews = [{"option": letter, "reason": "复核依据",
+                "verdict": "meets_question" if letter in candidates else "does_not_meet"}
+               for letter in "ABCD"]
+    assert decision(reviews=reviews, answer=answer).answer == answer
+    wrong = "A" if answer != "A" else "B"
+    with pytest.raises(ValidationError, match="unique reviewed candidate"):
+        decision(reviews=reviews, answer=wrong)
+    assert decision().answer == "D"  # Decisions stored before verdict fields remain readable.
+
+
+def test_audit_rejects_incomplete_verdicts_and_preserves_input_state(state):
+    reviews = decision().model_dump()["reviews"]
+    reviews[0]["verdict"] = "does_not_meet"
+    original = state.model_dump()
+    with pytest.raises(ValidationError, match="cover all four"):
+        decision(reviews=reviews)
+    assert state.model_dump() == original
+
+
+def test_constrained_audit_requires_nonnull_verdicts_without_changing_legacy_schema(state):
+    schema = assessment_response_format(covered(state))["json_schema"]["schema"]
+    review = schema["$defs"]["OptionReview"]
+    assert "verdict" in review["required"]
+    assert review["properties"]["verdict"]["enum"] == [
+        "meets_question", "does_not_meet", "uncertain",
+    ]
+    assert "verdict" not in OptionDecision.model_json_schema()["$defs"]["OptionReview"]["required"]
+
+
+def test_inconsistent_audit_fails_with_original_response_and_no_repair_or_retry(state):
+    original = state.model_dump()
+    bad = decision().model_dump()
+    for review in bad["reviews"]:
+        review["verdict"] = (
+            "meets_question" if review["option"] == "D" else "does_not_meet"
+        )
+    bad["answer"] = "A"
+    client = Client([*actions()[:4], {"operation": "AUDIT_OPTIONS", "decision": bad}])
+    with pytest.raises(RunnerStepError) as caught:
+        run_legal_state("材料", "原题", state, client, 24, workflow="verified",
+                        constrained_json=True, max_reasoning_output_tokens=8192)
+    assert caught.value.failed_step.stage == "parse_action"
+    assert len(caught.value.completed_steps) == 4
+    assert caught.value.failed_step.before_state.option_decision is None
+    assert json.loads(caught.value.failed_step.raw_model_output)["decision"]["answer"] == "A"
+    assert len(client.requests) == 5
+    assert state.model_dump() == original
 
 
 def test_independent_assessment_only_exposes_stem_and_current_option(state):
@@ -301,12 +358,64 @@ def test_hybrid_requires_verified_workflow():
         ExperimentConfig(legal_state_initial_analysis="cot")
 
 
-def test_draft_is_reserved_for_audit_after_independent_assessments(state):
+def test_rule_recall_is_tentative_and_consumes_the_shared_budget(tmp_path):
+    config = hybrid_config().model_copy(update={"legal_state_initial_analysis": "rules"})
+    rules = "规则假设：不同程序适用不同条件；例外记忆不确定。"
+    client = Client([rules, *actions(), {"answer": "D"}])
+    record = run_case(hybrid_case(), "legal_state", config,
+                      JournalClient(client, config, tmp_path / "rules.jsonl", "scripted"))
+    assert record["status"] == "completed"
+    assert "不选择答案" in client.requests[0][0]
+    assert client.formats[0] is None
+    assert record["draft_step"]["kind"] == "model_rule_recall"
+    assert record["initial_state"]["draft_reasoning"] == rules
+    assert record["initial_state"]["knowledge"] == []
+    assert rules not in [fact["content"] for fact in record["initial_state"]["facts"]]
+    assert record["usage"]["call_count"] == 8
+    assert record["usage"]["reasoning_output_tokens"] == 70
+
+
+def test_rule_recall_requires_verified_workflow():
+    with pytest.raises(ValidationError, match="rule recall"):
+        ExperimentConfig(legal_state_initial_analysis="rules")
+
+
+def test_draft_is_tentative_context_without_changing_material_evidence(state):
     state = LegalState.model_validate({**state.model_dump(), "draft_reasoning": "PRIVATE_DRAFT"})
-    assert "PRIVATE_DRAFT" not in build_assessment_prompt("原题", state)
+    original = state.model_dump()
+    data = json.loads(build_assessment_prompt("原题", state).split("输入数据：\n")[1])
+    assert data["tentative_draft"] == "PRIVATE_DRAFT"
+    assert {m["id"] for m in data["materials"]} == {"F1", "F2"}
+    assert data["knowledge"] == []
+    with pytest.raises(ValidationError, match="quoted facts"):
+        assess_option(state, assessment("A", conditions=[{
+            "condition": "条件", "evidence": ["tentative_draft"], "finding": "草稿推断",
+        }]))
     prompt = build_assessment_prompt("原题", covered(state))
     data = json.loads(prompt.split("输入数据：\n")[1])
     assert data["tentative_draft"] == "PRIVATE_DRAFT"
+    assert state.model_dump() == original
+
+
+def test_audit_retains_original_scoped_materials_and_date_arithmetic(state):
+    original = state.model_dump()
+    prompt = build_assessment_prompt("原题", covered(state))
+    data = json.loads(prompt.split("输入数据：\n")[1])
+    assert data["materials"] == [
+        {"id": fact.id, "content": fact.content, "scope": fact.material.scope}
+        for fact in state.facts
+    ]
+    assert data["knowledge"] == []
+    assert "quoted_date_intervals" not in data
+    dated = state.model_dump()
+    dated["facts"][0]["content"] = "2001年2月到2003年2月"
+    dated["facts"][0]["material"]["end"] = len(dated["facts"][0]["content"])
+    dated_state = LegalState.model_validate(dated)
+    prompt = build_assessment_prompt("原题", covered(dated_state))
+    data = json.loads(prompt.split("输入数据：\n")[1])
+    assert data["quoted_date_intervals"][0]["calendar_month_difference"] == 24
+    assert data["quoted_date_intervals"][0]["from"]["evidence"] == ["F1"]
+    assert state.model_dump() == original
 
 
 def test_quoted_date_intervals_preserve_month_precision_and_provenance():
@@ -321,3 +430,51 @@ def test_quoted_date_intervals_preserve_month_precision_and_provenance():
     assert ten_years["to"] == {"text": "2013年3月", "evidence": ["F2"]}
     assert result[0]["to"]["evidence"] == ["F1", "F2"]
     assert material_date_intervals([{"id": "F1", "content": "无日期"}]) == []
+
+
+def test_assessment_grammar_requires_grounded_first_condition_and_scoped_ids(state):
+    schema = assessment_response_format(state)["json_schema"]["schema"]
+    fields = schema["$defs"]["OptionAssessment"]["properties"]
+    assert fields["option"] == {"type": "string", "const": "A"}
+    first = fields["conditions"]["prefixItems"][0]["properties"]["evidence"]
+    assert first["minItems"] == 1
+    assert first["items"]["enum"] == ["F1", "F2"]
+    other = schema["$defs"]["RuleCondition"]["properties"]["evidence"]
+    assert "minItems" not in other  # Missing later conditions can still use [].
+    assert other["items"]["enum"] == ["F1", "F2"]
+    updated = assess_option(state, assessment("A"))
+    next_fields = assessment_response_format(updated)["json_schema"]["schema"]["$defs"]["OptionAssessment"]["properties"]
+    assert next_fields["option"]["const"] == "B"
+    assert next_fields["conditions"]["prefixItems"][0]["properties"]["evidence"]["items"]["enum"] == ["F1", "F3"]
+
+
+def test_comparison_context_keeps_claims_separate_from_usable_evidence(state):
+    original = state.model_dump()
+    data = json.loads(build_assessment_prompt("原题", state, compare_options=True).split("输入数据：\n")[1])
+    assert data["comparison_options"] == dict(zip("ABCD", "ABCD", strict=True))
+    assert {material["id"] for material in data["materials"]} == {"F1", "F2"}
+    with pytest.raises(ValidationError, match="crosses option scopes"):
+        assess_option(state, assessment("A", conditions=[{
+            "condition": "其他选项假设", "evidence": ["F3"], "finding": "不能作为本选项事实",
+        }]))
+    assert state.model_dump() == original
+
+
+def test_option_comparison_requires_verified_workflow():
+    with pytest.raises(ValidationError, match="Option comparison"):
+        ExperimentConfig(legal_state_compare_options=True)
+
+
+def test_calendar_intervals_never_join_different_hypothetical_cases():
+    from legal_state.assessment import scoped_material_date_intervals
+
+    result = scoped_material_date_intervals([
+        {"id": "F1", "content": "判断四个独立案情", "scope": None},
+        {"id": "F2", "content": "2001年3月到2002年3月", "scope": "A"},
+        {"id": "F3", "content": "2011年3月到2012年3月", "scope": "B"},
+    ])
+    assert len(result) == 2
+    assert {item["scope"] for item in result} == {"A", "B"}
+    assert {item["calendar_month_difference"] for item in result} == {12}
+    assert result[0]["from"]["evidence"] == result[0]["to"]["evidence"] == ["F2"]
+    assert result[1]["from"]["evidence"] == result[1]["to"]["evidence"] == ["F3"]

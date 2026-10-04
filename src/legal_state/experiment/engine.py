@@ -14,7 +14,7 @@ from legal_state.experiment.materials import scoped_material_state
 from legal_state.final_answer import generate_final_answer
 from legal_state.model import ModelCallResult
 from legal_state.runner import RunResult, RunnerStepError, TerminationReason, run_legal_state
-from legal_state.schemas import Fact, LegalState
+from legal_state.schemas import Fact, Issue, LegalState
 
 COMMON_INSTRUCTION = """依据原题材料分析四个候选选项，选择一个正确答案。
 每次只推进一个小步骤，用几句简短文字保留关键判断及必要依据。长分析分步完成，不重述原题或已经记录的分析。
@@ -22,6 +22,40 @@ COMMON_INSTRUCTION = """依据原题材料分析四个候选选项，选择一�
 每步开始前检查已有记录。必要判断已完成并足以支持明确选项时，立即按本方法的格式结束；不要反复验证相同结论。
 在终止推理前记录正确选项字母及简短理由。不要访问外部知识源。
 """
+
+MSLR_INSTRUCTION = """依据案件材料完成内幕交易案件分析与裁判预测。
+沿“内幕信息形成 → 信息知悉 → 交易行为 → 违法所得 → 法律适用与判决类型 → 处罚结果”逐步推进。
+每次只推进一个尚未完成的判断，用简洁文字保留事实、规则、适用过程和阶段结论，不重述原始材料。
+每步开始前检查已有记录；六个环节及最终裁判结论均已完成时立即按本方法的格式结束。
+仅依据题目与模型已有知识分析，不访问外部知识源；不虚构材料中不存在的事实。
+"""
+
+MSLR_STAGE_QUESTIONS = (
+    "内幕信息形成：本案哪些事项构成内幕信息，其形成及公开时间如何认定？",
+    "信息知悉：当事人是否以及如何知悉相关内幕信息？",
+    "交易行为：敏感期内实施了哪些与内幕信息相关的证券交易？",
+    "违法所得：涉案交易的违法所得如何认定？",
+    "法律适用与判决类型：应适用何种法律规则并作出何种裁判或处理？",
+    "处罚结果：对当事人应作出什么具体处罚？",
+)
+
+MSLR_STAGE_MARKERS = (
+    ("内幕信息",),
+    ("知悉", "获知"),
+    ("交易", "买入", "卖出"),
+    ("违法所得", "盈利"),
+    ("法律适用", "判决类型", "裁判", "处理"),
+    ("处罚", "罚款", "没收"),
+)
+
+
+def common_instruction(case: CaseInput) -> str:
+    return MSLR_INSTRUCTION if case.benchmark == "mslr" else COMMON_INSTRUCTION
+
+
+def mslr_artifact_complete(artifact: str) -> bool:
+    """Check protocol coverage before accepting a model's stop signal."""
+    return all(any(marker in artifact for marker in group) for group in MSLR_STAGE_MARKERS)
 
 
 def call_signature(prompt: str, limit: int, phase: str, response_format=None) -> str:
@@ -37,6 +71,17 @@ class GenericUpdate(BaseModel):
     plan: list[str]
     intermediate_answer: str
     stop: bool
+
+
+def generic_response_format() -> dict[str, object]:
+    """Constrain the generic baseline to its declared state protocol."""
+    return {
+        "type": "json_schema",
+        "json_schema": {
+            "name": "generic_state_update",
+            "schema": GenericUpdate.model_json_schema(),
+        },
+    }
 
 
 class JournalCorruptionError(ValueError):
@@ -253,25 +298,35 @@ def baseline_prompt(case: CaseInput, method: str, artifact: str) -> str:
     if method == "cot":
         instruction = (
             "用自由文本继续一步分析，不要输出 JSON。"
-            "这一小步只处理一个尚未完成的判断，不一次展开全部选项的长篇论证。"
-            "已有分析足以确定选项时，简短写明选项及理由，在末尾单独写 [STOP]。"
-            "尚未完成则保留本步结果，下一次继续；不要为写完长分析耗尽单次输出额度。"
+            "这一小步只处理一个尚未完成的判断。"
+            + (
+                "六个推理环节和完整裁判结论均已形成时，在末尾单独写 [STOP]。"
+                if case.benchmark == "mslr"
+                else "已有分析足以确定选项时，简短写明选项及理由，在末尾单独写 [STOP]。"
+            )
+            + "尚未完成则保留本步结果，下一次继续；不要为写完长分析耗尽单次输出额度。"
         )
     else:
+        completion = (
+            "六个推理环节和完整裁判结论均已形成时，plan 必须为空，"
+            "intermediate_answer 写完整分析结论，stop 必须为 true。"
+            if case.benchmark == "mslr"
+            else "必要判断已完成且已确定选项时，plan 必须为空，intermediate_answer 写选项字母及简短理由，stop 必须为 true。"
+        )
         instruction = (
             "更新通用状态，只输出严格 JSON，字段仅为 observations、plan、intermediate_answer、stop。"
-            "observations 用简短摘要保留必要判断和依据，合并重复内容；"
-            "plan 只列尚未完成的具体判断，完成一项就移除，不重新加入已经完成的任务。"
+            "observations 必须是字符串数组，用简短摘要保留必要判断和依据，合并重复内容；"
+            "plan 必须是字符串数组，只列尚未完成的具体判断，完成一项就移除，不重新加入已经完成的任务。"
             "未完成时 stop 为 false；intermediate_answer 保留已有阶段性结论。"
-            "必要判断已完成且已确定选项时，plan 必须为空，intermediate_answer 写选项字母及简短理由，stop 必须为 true。"
-            "若当前状态已经满足这些条件，本步直接输出完成状态，不重复上一状态。"
+            + completion
+            + "若当前状态已经满足这些条件，本步直接输出完成状态，不重复上一状态。"
             "完成状态的格式示例（内容为占位说明，不是本题答案）："
             '{"observations":["必要判断及依据"],"plan":[],'
-            '"intermediate_answer":"选项字母及简短理由","stop":true}。'
+            '"intermediate_answer":"完整结论或选项及理由","stop":true}。'
             "控制摘要长度，确保在单次输出额度内写完所有字段和 JSON 结束括号。"
         )
     return (
-        COMMON_INSTRUCTION
+        common_instruction(case)
         + instruction
         + "\n"
         + json.dumps(
@@ -283,6 +338,21 @@ def baseline_prompt(case: CaseInput, method: str, artifact: str) -> str:
             ensure_ascii=False,
             sort_keys=True,
         )
+    )
+
+
+def rule_recall_prompt(case: CaseInput) -> str:
+    """Elicit tentative conditional rules, without supplying knowledge or choosing."""
+    return (
+        "本步只闭卷回忆分析原题需要的法律规则，不生成最终答案。"
+        "仅使用模型已有知识，不访问外部知识源。"
+        "先辨认题干中的法律关系，再分别列出适用规则、成立条件和例外分支。"
+        "同一行为是否产生并列或竞合后果，要完整回忆，不能只记其中一种。"
+        "基础权利与合同义务分别核查法定期限和起算点，不能混用不同起点。"
+        "主体与程序规则分别核对身份、具体立场、程序阶段和处理行为，勿混同近似名称。"
+        "遵循原题时间适用的规则；记忆不确定时明示不确定，禁止虚构条号。"
+        "只列最多六条简短规则假设，每条不超过60字；不重述题干。\n"
+        + json.dumps({"question": case.question, "source_material": case.stem}, ensure_ascii=False)
     )
 
 
@@ -306,6 +376,16 @@ def run_case(
     try:
         if method == "legal_state":
             initial = LegalState(
+                issues=(
+                    [
+                        Issue(id=f"I{index}", question=question)
+                        for index, question in enumerate(
+                            MSLR_STAGE_QUESTIONS, start=1
+                        )
+                    ]
+                    if case.benchmark == "mslr"
+                    else []
+                ),
                 facts=[Fact(id="F1", content=case.stem, source="question_material")]
             )
             if config.legal_state_materials == "scoped_options":
@@ -313,9 +393,14 @@ def run_case(
             record["initial_state"] = initial.model_dump(mode="json")
             remaining_steps = config.reasoning.max_steps
             remaining_tokens = config.reasoning.max_output_tokens_total
-            if config.legal_state_initial_analysis == "cot":
-                prompt = baseline_prompt(case, "cot", "")
+            if config.legal_state_initial_analysis != "none":
+                prompt = (
+                    baseline_prompt(case, "cot", "")
+                    if config.legal_state_initial_analysis == "cot" else rule_recall_prompt(case)
+                )
                 record["draft_step"] = {"prompt": prompt, "call": None}
+                if config.legal_state_initial_analysis == "rules":
+                    record["draft_step"]["kind"] = "model_rule_recall"
                 stage = "model_call"
                 call = client.generate(
                     prompt, max_output_tokens=min(
@@ -348,7 +433,7 @@ def run_case(
                     case_text=case.stem,
                     question=(
                         case.question if config.legal_state_workflow == "verified"
-                        else COMMON_INSTRUCTION + case.question
+                        else common_instruction(case) + case.question
                     ),
                     initial_state=initial,
                     model_client=client,
@@ -356,6 +441,8 @@ def run_case(
                     max_reasoning_output_tokens=remaining_tokens,
                     workflow=config.legal_state_workflow,
                     constrained_json=config.legal_state_constrained_json,
+                    require_question_frame=config.legal_state_question_frame,
+                    compare_options=config.legal_state_compare_options,
                 )
             record["steps"] = [step.model_dump(mode="json") for step in result.steps]
             record["initial_state"] = initial.model_dump(mode="json")
@@ -386,11 +473,17 @@ def run_case(
                 )
                 prompt = baseline_prompt(case, method, current)
                 stage = "model_call"
+                format_options = (
+                    {"response_format": generic_response_format()}
+                    if method == "generic"
+                    else {}
+                )
                 call = client.generate(
                     prompt,
                     max_output_tokens=min(
                         config.reasoning.max_output_tokens_per_call, remaining
                     ),
+                    **format_options,
                 )
                 step = {
                     "step_index": index,
@@ -411,11 +504,26 @@ def run_case(
                     if stopped:
                         text = text[: -len("[STOP]")].rstrip()
                     artifact = "\n".join(part for part in (artifact, text) if part)
+                    if (
+                        stopped
+                        and case.benchmark == "mslr"
+                        and not mslr_artifact_complete(artifact)
+                    ):
+                        stopped = False
                 else:
                     state = GenericUpdate.model_validate_json(
                         call.raw_text
                     ).model_dump()
                     stopped = state["stop"]
+                    if (
+                        stopped
+                        and case.benchmark == "mslr"
+                        and not mslr_artifact_complete(
+                            json.dumps(state, ensure_ascii=False)
+                        )
+                    ):
+                        state["stop"] = False
+                        stopped = False
                     artifact = json.dumps(state, ensure_ascii=False, sort_keys=True)
                 step["after"] = artifact
                 if stopped:
@@ -432,7 +540,10 @@ def run_case(
             provided_knowledge=(),
             reasoning_artifact=artifact,
             model_client=client,
-            answer_format="single_choice",
+            answer_format=(
+                "free_text" if case.benchmark == "mslr" else "single_choice"
+            ),
+            constrained_json=case.benchmark == "mslr",
         )
         record["final_answer_result"] = answer.model_dump(mode="json")
         record["final_answer"] = answer.parsed_answer.answer

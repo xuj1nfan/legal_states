@@ -3,7 +3,7 @@ from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
 
-from legal_state.schemas import OptionAssessment, OptionDecision
+from legal_state.schemas import OptionAssessment, OptionDecision, QuestionFrame
 
 __all__ = [
     "Action",
@@ -13,6 +13,7 @@ __all__ = [
     "BindFactAction",
     "CommitAction",
     "ExpandIssueAction",
+    "FrameQuestionAction",
     "ResolveAction",
     "StopAction",
     "parse_action_json",
@@ -27,6 +28,7 @@ class ActionName(StrEnum):
     STOP = "STOP"
     ASSESS_OPTION = "ASSESS_OPTION"
     AUDIT_OPTIONS = "AUDIT_OPTIONS"
+    FRAME_QUESTION = "FRAME_QUESTION"
 
 
 class _ActionModel(BaseModel):
@@ -74,9 +76,14 @@ class AuditOptionsAction(_ActionModel):
     decision: OptionDecision
 
 
+class FrameQuestionAction(_ActionModel):
+    operation: Literal[ActionName.FRAME_QUESTION]
+    frame: QuestionFrame
+
+
 Action = Annotated[
     ExpandIssueAction | BindFactAction | CommitAction | ResolveAction | StopAction
-    | AssessOptionAction | AuditOptionsAction,
+    | AssessOptionAction | AuditOptionsAction | FrameQuestionAction,
     Field(discriminator="operation"),
 ]
 

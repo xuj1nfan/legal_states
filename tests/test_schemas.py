@@ -453,6 +453,7 @@ def test_json_schema() -> None:
         "option_assessments",
         "option_decision",
         "draft_reasoning",
+        "question_frame",
     }
     assert schema["$defs"]["IssueStatus"]["enum"] == ["open", "reasoning", "resolved"]
     assert schema["additionalProperties"] is False

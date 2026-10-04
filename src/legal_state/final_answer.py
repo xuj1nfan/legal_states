@@ -92,6 +92,13 @@ def build_final_answer_prompt(
         if answer_format == "single_choice"
         else ""
     )
+    free_text_instruction = (
+        "\n9. 本题要求开放式分析。answer 应完整保留推理记录中与原问题有关的事实认定、"
+        "法律适用、推导过程和裁判结论；按六个分析环节组织，总长度控制在 1200 个汉字以内，"
+        "合并重复表述并确保 JSON 完整闭合。\n"
+        if answer_format == "free_text"
+        else ""
+    )
     return f"""你是统一的最终答案生成器。
 
 输入包含原始案件、原始问题、给定法律知识，以及上游产生的推理记录。
@@ -107,7 +114,7 @@ def build_final_answer_prompt(
 7. 只输出严格 JSON，格式必须为：
    {{"answer":"最终答案"}}
 8. 不得输出 Markdown、解释、思维链或额外字段。
-{choice_instruction}
+{choice_instruction}{free_text_instruction}
 
 输入数据：
 {input_json}
@@ -121,6 +128,17 @@ def parse_final_answer_json(
     return FinalAnswer.model_validate_json(data, strict=True)
 
 
+def final_answer_response_format() -> dict[str, object]:
+    """Return the provider schema for a strictly encoded final answer."""
+    return {
+        "type": "json_schema",
+        "json_schema": {
+            "name": "final_answer",
+            "schema": FinalAnswer.model_json_schema(),
+        },
+    }
+
+
 def generate_final_answer(
     *,
     case_text: str,
@@ -129,6 +147,7 @@ def generate_final_answer(
     reasoning_artifact: str,
     model_client: ModelClient,
     answer_format: Literal["free_text", "single_choice"] = "free_text",
+    constrained_json: bool = False,
 ) -> FinalAnswerResult:
     """调用一次模型并严格解析统一最终答案。"""
     prompt = build_final_answer_prompt(
@@ -140,7 +159,12 @@ def generate_final_answer(
     )
 
     try:
-        model_call = model_client.generate(prompt)
+        format_options = (
+            {"response_format": final_answer_response_format()}
+            if constrained_json
+            else {}
+        )
+        model_call = model_client.generate(prompt, **format_options)
     except Exception as error:
         raise FinalAnswerError(
             stage="model_call",

@@ -7,10 +7,11 @@ from legal_state.actions import (
     BindFactAction,
     CommitAction,
     ExpandIssueAction,
+    FrameQuestionAction,
     ResolveAction,
     StopAction,
 )
-from legal_state.assessment import assess_option, audit_options
+from legal_state.assessment import assess_option, audit_options, frame_question
 from legal_state.operations import bind_fact, commit, expand_issue, resolve
 from legal_state.schemas import LegalState
 
@@ -19,6 +20,8 @@ __all__ = ["apply_action"]
 
 def apply_action(state: LegalState, action: Action) -> LegalState:
     """将一个已校验行动分派给对应的状态操作。"""
+    if isinstance(action, FrameQuestionAction):
+        return frame_question(state, action.frame)
     if isinstance(action, AssessOptionAction):
         return assess_option(state, action.assessment)
     if isinstance(action, AuditOptionsAction):

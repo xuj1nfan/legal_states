@@ -29,6 +29,59 @@ def test_response_schema_is_sent_per_call_and_does_not_repair_output(monkeypatch
     assert "response_format" not in payloads[1]
 
 
+def test_compact_json_only_changes_schema_decoding_without_repair(monkeypatch):
+    payloads = []
+
+    def fake_post(url, *, headers, json, timeout):
+        payloads.append(json)
+        return make_response(valid_response('{"answer":"D"}'))
+
+    monkeypatch.setattr(httpx, "post", fake_post)
+    options = {"chat_template_kwargs": {"enable_thinking": False}}
+    client = ModelClient("fixture-key", "fixture-model", ENDPOINT,
+                         provider_options=options, compact_json=True)
+    client.generate("CoT")
+    response_format = {"type": "json_schema", "json_schema": {
+        "name": "action", "schema": {"type": "object", "properties": {"answer": {"type": "string", "enum": ["D"]}}, "required": ["answer"], "additionalProperties": False},
+    }}
+    result = client.generate("JSON", response_format=response_format, max_output_tokens=512)
+    client.generate("final answer")
+    assert "structured_outputs" not in payloads[0]
+    assert "structured_outputs" not in payloads[2]
+    assert payloads[1]["structured_outputs"]["grammar"].startswith("root ::=")
+    assert "response_format" not in payloads[1]
+    assert payloads[1]["max_tokens"] == 512
+    assert result.raw_text == '{"answer":"D"}'
+    assert options == {"chat_template_kwargs": {"enable_thinking": False}}
+
+
+def test_compact_audit_scope_preserves_planning_and_assessment_requests(monkeypatch):
+    payloads = []
+
+    def fake_post(url, *, headers, json, timeout):
+        payloads.append(json)
+        return make_response(valid_response("{incomplete"))
+
+    monkeypatch.setattr(httpx, "post", fake_post)
+    client = ModelClient("fixture-key", "fixture-model", ENDPOINT,
+                         compact_json=True, compact_json_scope="audit")
+    formats = []
+    for operation in ("FRAME_QUESTION", "ASSESS_OPTION", "AUDIT_OPTIONS"):
+        response_format = {"type": "json_schema", "json_schema": {
+            "name": "action", "schema": {"type": "object", "properties": {
+                "operation": {"type": "string", "const": operation},
+            }, "required": ["operation"], "additionalProperties": False},
+        }}
+        formats.append(response_format)
+        result = client.generate("JSON", response_format=response_format)
+        assert result.raw_text == "{incomplete"  # No response repair in either scope.
+    for index in (0, 1):
+        assert payloads[index]["response_format"] == formats[index]
+        assert "structured_outputs" not in payloads[index]
+    assert "response_format" not in payloads[2]
+    assert "grammar" in payloads[2]["structured_outputs"]
+
+
 def make_response(payload: dict[str, object], status_code: int = 200) -> httpx.Response:
     request = httpx.Request("POST", ENDPOINT)
     return httpx.Response(status_code, request=request, json=payload)

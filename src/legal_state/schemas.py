@@ -6,6 +6,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 __all__ = [
     "Conclusion",
     "Fact",
+    "FramedCheck",
     "Issue",
     "IssueStatus",
     "Knowledge",
@@ -14,6 +15,7 @@ __all__ = [
     "OptionAssessment",
     "OptionDecision",
     "OptionReview",
+    "QuestionFrame",
     "Relation",
     "RuleCondition",
     "StateTransition",
@@ -110,6 +112,24 @@ OptionLetter = Literal["A", "B", "C", "D"]
 OptionVerdict = Literal["meets_question", "does_not_meet", "uncertain"]
 
 
+class FramedCheck(_SchemaModel):
+    """由原文触发的待核查问题；不是已证事实或法律知识。"""
+
+    trigger_quote: str | None = Field(
+        default=None, min_length=1, exclude_if=lambda value: value is None
+    )
+    question: str = Field(min_length=1)
+    evidence: list[str] = Field(min_length=1, max_length=3)
+    scope: OptionLetter | None = None
+
+
+class QuestionFrame(_SchemaModel):
+    """先定位题目问法与可能决定规则分支的事实，不预先选择答案。"""
+
+    question_type: Literal["correct", "incorrect", "other"]
+    checks: list[FramedCheck] = Field(min_length=1, max_length=6)
+
+
 class RuleCondition(_SchemaModel):
     """模型声明的规则条件及原文依据；不表示规则已获外部核验。"""
 
@@ -122,9 +142,10 @@ class OptionAssessment(_SchemaModel):
     """按题目问法判断一个选项，保留规则、条件映射及例外。"""
 
     option: OptionLetter
+    # Locate concrete conditions before recalling a rule to explain them.
+    conditions: list[RuleCondition] = Field(min_length=1, max_length=3)
     rule: str = Field(min_length=1)
     rule_source: Literal["model_recall", "provided_knowledge"]
-    conditions: list[RuleCondition] = Field(min_length=1, max_length=3)
     exception: str = Field(min_length=1)
     verdict: OptionVerdict
 
@@ -138,20 +159,37 @@ class OptionAssessment(_SchemaModel):
 class OptionReview(_SchemaModel):
     option: OptionLetter
     reason: str = Field(min_length=1)
+    verdict: OptionVerdict | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
 
 
 class OptionDecision(_SchemaModel):
     """复核可修订初判，原始评估仍保留在轨迹中。"""
 
     reviews: list[OptionReview] = Field(min_length=4, max_length=4)
-    answer: Literal["A", "B", "C", "D", "UNKNOWN"]
     rationale: str = Field(min_length=1)
     counterargument: str = Field(min_length=1)
+    # Generate the choice after its supporting and competing reasons.
+    answer: Literal["A", "B", "C", "D", "UNKNOWN"]
 
     @model_validator(mode="after")
     def validate_selection(self) -> Self:
         if {review.option for review in self.reviews} != set("ABCD"):
             raise ValueError("Audit must review every option exactly once")
+        # Historical decisions have no verdicts. New decisions must be complete
+        # and consistent with their explicit reviews; this is not legal validation.
+        verdicts = [review.verdict for review in self.reviews]
+        if any(verdict is not None for verdict in verdicts):
+            if None in verdicts:
+                raise ValueError("Audit verdicts must cover all four options")
+            candidates = [
+                review.option for review in self.reviews
+                if review.verdict == "meets_question"
+            ]
+            expected = candidates[0] if len(candidates) == 1 else "UNKNOWN"
+            if self.answer != expected:
+                raise ValueError("Audit answer must match the unique reviewed candidate")
         return self
 
 
@@ -174,6 +212,27 @@ class LegalState(_SchemaModel):
     draft_reasoning: str | None = Field(
         default=None, min_length=1, exclude_if=lambda value: value is None
     )
+    question_frame: QuestionFrame | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
+
+    @model_validator(mode="after")
+    def validate_question_frame(self) -> Self:
+        if self.question_frame is None:
+            return self
+        facts = {fact.id: fact for fact in self.facts}
+        for check in self.question_frame.checks:
+            for reference in check.evidence:
+                fact = facts.get(reference)
+                if fact is None or fact.material is None:
+                    raise ValueError("Framed checks must reference quoted materials")
+                if fact.material.scope not in (None, check.scope):
+                    raise ValueError("Framed check evidence crosses option scopes")
+            if check.trigger_quote is not None and not any(
+                check.trigger_quote in facts[reference].content for reference in check.evidence
+            ):
+                raise ValueError("Frame trigger quote must occur verbatim in its evidence")
+        return self
 
     @model_validator(mode="after")
     def validate_option_assessments(self) -> Self:

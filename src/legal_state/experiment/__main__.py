@@ -15,12 +15,17 @@ from legal_state.experiment.storage import freeze, preflight, run_batch
 
 
 def parser() -> argparse.ArgumentParser:
-    top = argparse.ArgumentParser(description="LawBench 3-6 controlled experiments")
+    top = argparse.ArgumentParser(description="MSLR multi-step legal reasoning experiments")
     sub = top.add_subparsers(dest="command", required=True)
     command = sub.add_parser(
         "prepare", help="Validate source data and create eligibility review"
     )
     command.add_argument("--source", required=True, type=Path)
+    command.add_argument(
+        "--references",
+        type=Path,
+        help="MSLR processed_anonymized directory (inferred beside the source by default)",
+    )
     command.add_argument("--out", required=True, type=Path)
     command = sub.add_parser(
         "split", help="Create immutable development/test/process subsets"
@@ -42,12 +47,12 @@ def parser() -> argparse.ArgumentParser:
     ):
         command = sub.add_parser(name)
         command.add_argument(
-            "--config", type=Path, default=Path("configs/lawbench_3_6.yaml")
+            "--config", type=Path, default=Path("configs/mslr.yaml")
         )
         if name != "preflight":
             command.add_argument("--run-id", required=True)
         if name == "freeze":
-            command.add_argument("--dev-run-id", default="lawbench_3_6_dev_01")
+            command.add_argument("--dev-run-id", default="mslr_dev_01")
         if name == "run":
             command.add_argument("--split", choices=("dev", "test"), required=True)
             command.add_argument("--resume", action="store_true")
@@ -58,6 +63,11 @@ def parser() -> argparse.ArgumentParser:
             )
         if name == "score":
             command.add_argument("--official-check", action="store_true")
+            command.add_argument(
+                "--embedding-model",
+                type=Path,
+                help="Local ChatLaw-Text2Vec path required by official MSLR IRAC scoring",
+            )
         if name == "human-review-import":
             command.add_argument("--ratings", required=True, type=Path)
     return top
@@ -68,7 +78,7 @@ def main(argv: list[str] | None = None) -> int:
     root = Path.cwd()
     try:
         if args.command == "prepare":
-            result = prepare(args.source, args.out)
+            result = prepare(args.source, args.out, args.references)
         elif args.command == "split":
             result = split(
                 args.data,
@@ -104,7 +114,13 @@ def main(argv: list[str] | None = None) -> int:
                         config, root, args.run_id, args.split, args.resume
                     )
             elif args.command == "score":
-                result = score(config, root, args.run_id, args.official_check)
+                result = score(
+                    config,
+                    root,
+                    args.run_id,
+                    args.official_check,
+                    args.embedding_model,
+                )
             elif args.command == "human-review-export":
                 result = export_review(config, root, args.run_id)
             elif args.command == "human-review-import":

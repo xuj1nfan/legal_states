@@ -118,15 +118,20 @@ def _snapshot(state: LegalState) -> LegalState:
 
 
 def determine_allowed_operations(
-    state: LegalState, *, workflow: Literal["free", "sequential", "verified"] = "free"
+    state: LegalState, *, workflow: Literal["free", "sequential", "verified"] = "free",
+    require_question_frame: bool = False,
 ) -> tuple[ActionName, ...]:
     """返回结构上可执行的操作，不判断法律上的合理性。"""
     validated_state = _snapshot(state)
     if workflow not in ("free", "sequential", "verified"):
         raise ValueError("Unknown Legal State workflow")
+    if require_question_frame and workflow != "verified":
+        raise ValueError("Question framing requires the verified workflow")
     if workflow == "verified":
         if validated_state.option_decision:
             return (ActionName.STOP,)
+        if require_question_frame and validated_state.question_frame is None:
+            return (ActionName.FRAME_QUESTION,)
         if next_option(validated_state) is not None:
             return (ActionName.ASSESS_OPTION,)
         return (ActionName.AUDIT_OPTIONS,)
@@ -180,6 +185,76 @@ def determine_allowed_operations(
     return tuple(operations)
 
 
+def action_response_format(
+    state: LegalState,
+    allowed_operations: tuple[ActionName, ...],
+    *,
+    focus_issue_id: str | None = None,
+) -> dict[str, object]:
+    """Constrain free/sequential actions to valid fields and current references."""
+    branches: list[dict[str, object]] = []
+    schema_operations = (
+        (ActionName.STOP,)
+        if ActionName.STOP in allowed_operations
+        else allowed_operations
+    )
+    for operation in schema_operations:
+        properties: dict[str, object] = {
+            "operation": {"type": "string", "const": operation.value}
+        }
+        required = ["operation"]
+        if operation is ActionName.EXPAND_ISSUE:
+            properties["question"] = {"type": "string", "minLength": 1}
+            required.append("question")
+        elif operation is ActionName.BIND_FACT:
+            properties.update(
+                issue_id={"type": "string", "const": focus_issue_id},
+                fact_ids={
+                    "type": "array",
+                    "items": {
+                        "type": "string",
+                        "enum": [fact.id for fact in state.facts],
+                    },
+                    "minItems": 1,
+                },
+            )
+            required.extend(("issue_id", "fact_ids"))
+        elif operation is ActionName.COMMIT:
+            properties.update(
+                issue_id={"type": "string", "const": focus_issue_id},
+                conclusion={"type": "string", "minLength": 1},
+                support={
+                    "type": "array",
+                    "items": {
+                        "type": "string",
+                        "enum": state.allowed_support_ids(focus_issue_id),
+                    },
+                },
+            )
+            required.extend(("issue_id", "conclusion", "support"))
+        elif operation is ActionName.RESOLVE:
+            properties["issue_id"] = {
+                "type": "string",
+                "const": focus_issue_id,
+            }
+            required.append("issue_id")
+        elif operation is not ActionName.STOP:
+            raise ValueError(f"Unsupported action schema for {operation.value}")
+        branches.append(
+            {
+                "type": "object",
+                "properties": properties,
+                "required": required,
+                "additionalProperties": False,
+            }
+        )
+    schema = branches[0] if len(branches) == 1 else {"anyOf": branches}
+    return {
+        "type": "json_schema",
+        "json_schema": {"name": "legal_state_action", "schema": schema},
+    }
+
+
 def _failed_step_record(
     *,
     step_index: int,
@@ -221,10 +296,14 @@ def run_legal_state(
     max_reasoning_output_tokens: int | None = None,
     workflow: Literal["free", "sequential", "verified"] = "free",
     constrained_json: bool = False,
+    require_question_frame: bool = False,
+    compare_options: bool = False,
 ) -> RunResult:
     """同步执行一个有步数上限的 Legal State loop。"""
     if max_steps <= 0:
         raise ValueError("max_steps must be positive")
+    if compare_options and workflow != "verified":
+        raise ValueError("Option comparison requires the verified workflow")
     if max_reasoning_output_tokens is not None and max_reasoning_output_tokens <= 0:
         raise ValueError("max_reasoning_output_tokens must be positive")
 
@@ -243,7 +322,7 @@ def run_legal_state(
             break
         before_state = _snapshot(current_state)
         allowed_operations = determine_allowed_operations(
-            before_state, workflow=workflow
+            before_state, workflow=workflow, require_question_frame=require_question_frame,
         )
         focus_issue_id = None
         if workflow == "sequential":
@@ -256,7 +335,8 @@ def run_legal_state(
                 None,
             )
         prompt = (
-            build_assessment_prompt(question, before_state)
+            build_assessment_prompt(question, before_state, require_question_frame=require_question_frame,
+                                    compare_options=compare_options)
             if workflow == "verified"
             else build_action_prompt(
                 case_text,
@@ -267,10 +347,20 @@ def run_legal_state(
             )
         )
 
+        if workflow == "verified" and constrained_json:
+            response_format = assessment_response_format(
+                before_state, require_question_frame=require_question_frame,
+            )
+        elif constrained_json:
+            response_format = action_response_format(
+                before_state,
+                allowed_operations,
+                focus_issue_id=focus_issue_id,
+            )
+        else:
+            response_format = None
         format_options = (
-            {"response_format": assessment_response_format(before_state)}
-            if workflow == "verified" and constrained_json
-            else {}
+            {"response_format": response_format} if response_format else {}
         )
 
         try:

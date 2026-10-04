@@ -1,9 +1,12 @@
-# Closed-book CoT draft followed by grounded Legal State option verification.
-experiment_id: lawbench_3_6_qwen35_9b_hybrid_v5
+# Independent source-grounded assessments without a CoT draft; same shared budgets.
+experiment_id: lawbench_3_6_qwen35_9b_framed_independent_v4
 legal_state_workflow: verified
 legal_state_materials: scoped_options
 legal_state_constrained_json: true
-legal_state_initial_analysis: cot
+legal_state_compact_json: true
+legal_state_compact_json_scope: audit
+legal_state_initial_analysis: none
+legal_state_question_frame: true
 task_id: "3-6"
 seed: 20260930
 methods: [cot, generic, legal_state]

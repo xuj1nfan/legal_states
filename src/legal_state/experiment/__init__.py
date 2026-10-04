@@ -1,1 +1,1 @@
-"""Reproducible LawBench experiments; targets stay outside model inputs."""
+"""Reproducible legal benchmarks; targets stay outside model inputs."""

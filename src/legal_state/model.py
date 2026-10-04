@@ -1,7 +1,10 @@
 import time
+from typing import Literal
 
 import httpx
 from pydantic import BaseModel, ConfigDict, Field
+
+from legal_state.json_grammar import compact_json_grammar
 
 __all__ = ["ModelCallResult", "ModelClient"]
 
@@ -62,6 +65,8 @@ class ModelClient:
         temperature: float = 0,
         max_output_tokens: int = 2048,
         provider_options: dict[str, object] | None = None,
+        compact_json: bool = False,
+        compact_json_scope: Literal["all", "audit"] = "all",
     ) -> None:
         if not api_key:
             raise ValueError("api_key must not be empty")
@@ -83,6 +88,10 @@ class ModelClient:
         self._timeout_seconds = timeout_seconds
         self._temperature = temperature
         self.max_output_tokens = max_output_tokens
+        self._compact_json = compact_json
+        if compact_json_scope not in {"all", "audit"}:
+            raise ValueError("Unknown compact JSON scope")
+        self._compact_json_scope = compact_json_scope
         self._provider_options = (
             {"thinking": {"type": "disabled"}}
             if provider_options is None
@@ -107,6 +116,18 @@ class ModelClient:
             raise ValueError("max_output_tokens must be positive")
         self.last_response = None
 
+        json_options = {}
+        compact_request = self._compact_json and response_format is not None
+        if compact_request and self._compact_json_scope == "audit":
+            schema = response_format.get("json_schema", {}).get("schema", {})
+            compact_request = schema.get("properties", {}).get("operation", {}).get("const") == "AUDIT_OPTIONS"
+        if compact_request:
+            if response_format.get("type") != "json_schema":
+                raise ValueError("Compact JSON requires a json_schema response format")
+            json_options = {"structured_outputs": {
+                "grammar": compact_json_grammar(response_format["json_schema"]["schema"]),
+            }}
+
         started_at = time.perf_counter()
         response = httpx.post(
             self._endpoint,
@@ -118,7 +139,9 @@ class ModelClient:
                 "model": self._model,
                 "messages": [{"role": "user", "content": prompt}],
                 **self._provider_options,
-                **({"response_format": response_format} if response_format is not None else {}),
+                **json_options,
+                **({"response_format": response_format}
+                   if response_format is not None and not compact_request else {}),
                 "temperature": self._temperature,
                 "max_tokens": limit,
                 "n": 1,

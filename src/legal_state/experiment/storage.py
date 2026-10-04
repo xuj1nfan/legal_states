@@ -15,8 +15,10 @@ from legal_state.experiment.config import (
 )
 from legal_state.experiment.data import dataset_fingerprint, load_cases
 from legal_state.experiment.engine import (
+    GenericUpdate,
     JournalClient,
     JournalCorruptionError,
+    generic_response_format,
     raw_response,
     run_case,
     scrub_error,
@@ -28,6 +30,7 @@ from legal_state.experiment.io import (
     source_fingerprint,
     write_json,
 )
+from legal_state.json_grammar import compact_json_grammar, has_formatting_whitespace
 
 
 def run_path(config: ExperimentConfig, run_id: str, root: Path) -> Path:
@@ -59,6 +62,7 @@ def runtime_identity() -> dict:
 
 def preflight(config: ExperimentConfig, root: Path, client=None) -> dict:
     key = preflight_key(config, root)
+    compact_planning = config.legal_state_compact_json and config.legal_state_compact_json_scope == "all"
     client = create_client(config) if client is None else client
     report = {
         "identity": key,
@@ -97,13 +101,181 @@ def preflight(config: ExperimentConfig, root: Path, client=None) -> dict:
             )
         if result.output_tokens > 128 or read_answer(result.raw_text) != "A":
             raise ValueError("Preflight response does not satisfy output contract")
+        if compact_planning and has_formatting_whitespace(result.raw_text):
+            raise ValueError("Compact JSON preflight decoded formatting whitespace")
+        report["raw_response"] = raw_response(client, config)
+        if "generic" in config.methods:
+            prompt = (
+                "只输出严格 JSON。observations 和 plan 必须是字符串数组，"
+                "intermediate_answer 必须是字符串，stop 必须是布尔值。"
+                "记录已经识别材料并保留一个待办事项。"
+            )
+            response_format = generic_response_format()
+            report["generic_probe"] = {
+                "prompt": prompt,
+                "response_format": response_format,
+            }
+            probe = client.generate(
+                prompt,
+                max_output_tokens=256,
+                response_format=response_format,
+            )
+            report["generic_probe"].update(
+                result=probe.model_dump(), raw_response=raw_response(client, config)
+            )
+            if (
+                probe.model != result.model
+                or probe.finish_reason != "stop"
+                or probe.reasoning_tokens not in (None, 0)
+                or probe.output_tokens > 256
+            ):
+                raise ValueError("Generic schema preflight failed the model/output contract")
+            GenericUpdate.model_validate_json(probe.raw_text)
+        if (
+            config.legal_state_workflow == "sequential"
+            and config.legal_state_constrained_json
+        ):
+            from legal_state.actions import BindFactAction, parse_action_json
+            from legal_state.prompts import build_action_prompt
+            from legal_state.runner import (
+                action_response_format,
+                determine_allowed_operations,
+            )
+            from legal_state.schemas import Fact, Issue, LegalState
+
+            state = LegalState(
+                issues=[Issue(id="I1", question="测试争点")],
+                facts=[Fact(id="F1", content="测试材料", source="preflight")],
+            )
+            allowed = determine_allowed_operations(state, workflow="sequential")
+            prompt = build_action_prompt(
+                "测试材料", "测试问题", state, allowed, focus_issue_id="I1"
+            )
+            response_format = action_response_format(
+                state, allowed, focus_issue_id="I1"
+            )
+            report["sequential_probe"] = {
+                "prompt": prompt,
+                "response_format": response_format,
+            }
+            probe = client.generate(
+                prompt,
+                max_output_tokens=256,
+                response_format=response_format,
+            )
+            report["sequential_probe"].update(
+                result=probe.model_dump(), raw_response=raw_response(client, config)
+            )
+            if (
+                probe.model != result.model
+                or probe.finish_reason != "stop"
+                or probe.reasoning_tokens not in (None, 0)
+                or probe.output_tokens > 256
+            ):
+                raise ValueError(
+                    "Sequential schema preflight failed the model/output contract"
+                )
+            action = parse_action_json(probe.raw_text)
+            if not isinstance(action, BindFactAction) or action.issue_id != "I1":
+                raise ValueError("Sequential preflight requires BIND_FACT for I1")
+            if compact_planning and has_formatting_whitespace(probe.raw_text):
+                raise ValueError("Compact sequential preflight decoded whitespace")
+        if config.legal_state_question_frame:
+            from legal_state.actions import (
+                AssessOptionAction, AuditOptionsAction, FrameQuestionAction, parse_action_json,
+            )
+            from legal_state.assessment import assessment_response_format, build_assessment_prompt
+            from legal_state.executor import apply_action
+            from legal_state.experiment.data import CaseInput
+            from legal_state.experiment.materials import scoped_material_state
+
+            # Probe the actual framing grammar on an independent synthetic item,
+            # rather than discovering unsupported schema features on a benchmark.
+            case = CaseInput(case_id="lawbench-3-6-000000", source_index=0,
+                             stem="测试题干", question="测试题干A:甲B:乙C:丙D:丁",
+                             options=dict(zip("ABCD", "甲乙丙丁", strict=True)))
+            state = scoped_material_state(case)
+            prompt = build_assessment_prompt(case.question, state, require_question_frame=True,
+                                                   compare_options=config.legal_state_compare_options)
+            response_format = (
+                assessment_response_format(state, require_question_frame=True)
+                if config.legal_state_constrained_json else None
+            )
+            report["framing_probe"] = {"prompt": prompt, "response_format": response_format}
+            if compact_planning:
+                report["framing_probe"]["grammar"] = compact_json_grammar(response_format["json_schema"]["schema"])
+            format_options = {"response_format": response_format} if response_format else {}
+            probe = client.generate(prompt, max_output_tokens=512, **format_options)
+            report["framing_probe"].update(result=probe.model_dump(), raw_response=raw_response(client, config))
+            if compact_planning and has_formatting_whitespace(probe.raw_text):
+                raise ValueError("Compact framing preflight decoded formatting whitespace")
+            if (probe.model != result.model or probe.finish_reason != "stop"
+                    or probe.reasoning_tokens not in (None, 0) or probe.output_tokens > 512):
+                raise ValueError("Framing preflight failed the model/output contract")
+            action = parse_action_json(probe.raw_text)
+            if not isinstance(action, FrameQuestionAction):
+                raise ValueError("Framing preflight requires FRAME_QUESTION")
+            state = apply_action(state, action)
+            prompt = build_assessment_prompt(case.question, state, require_question_frame=True,
+                                                   compare_options=config.legal_state_compare_options)
+            response_format = (
+                assessment_response_format(state, require_question_frame=True)
+                if config.legal_state_constrained_json else None
+            )
+            report["assessment_probe"] = {"prompt": prompt, "response_format": response_format}
+            if compact_planning:
+                report["assessment_probe"]["grammar"] = compact_json_grammar(response_format["json_schema"]["schema"])
+            format_options = {"response_format": response_format} if response_format else {}
+            probe = client.generate(prompt, max_output_tokens=512, **format_options)
+            report["assessment_probe"].update(result=probe.model_dump(), raw_response=raw_response(client, config))
+            if compact_planning and has_formatting_whitespace(probe.raw_text):
+                raise ValueError("Compact assessment preflight decoded formatting whitespace")
+            if (probe.model != result.model or probe.finish_reason != "stop"
+                    or probe.reasoning_tokens not in (None, 0) or probe.output_tokens > 512):
+                raise ValueError("Assessment preflight failed the model/output contract")
+            action = parse_action_json(probe.raw_text)
+            if not isinstance(action, AssessOptionAction):
+                raise ValueError("Assessment preflight requires ASSESS_OPTION")
+            state = apply_action(state, action)
+            if config.legal_state_compact_json:
+                from legal_state.schemas import OptionAssessment
+
+                # Populate the remaining synthetic hypotheses without spending
+                # benchmark calls; probe the nested audit schema that used to loop.
+                for letter in "BCD":
+                    material_id = next(fact.id for fact in state.facts
+                                       if fact.material and fact.material.scope == letter)
+                    assessed = OptionAssessment(
+                        option=letter, rule="合成预检题无案情，无法判断",
+                        rule_source="model_recall", exception="无法确定",
+                        conditions=[{"condition": "选项原文", "evidence": [material_id],
+                                     "finding": "未给定案情"}], verdict="uncertain",
+                    )
+                    state = apply_action(state, AssessOptionAction(
+                        operation="ASSESS_OPTION", assessment=assessed,
+                    ))
+                prompt = build_assessment_prompt(case.question, state, require_question_frame=True,
+                                                   compare_options=config.legal_state_compare_options)
+                response_format = assessment_response_format(state, require_question_frame=True)
+                report["audit_probe"] = {"prompt": prompt, "response_format": response_format}
+                report["audit_probe"]["grammar"] = compact_json_grammar(response_format["json_schema"]["schema"])
+                probe = client.generate(prompt, max_output_tokens=512, response_format=response_format)
+                report["audit_probe"].update(result=probe.model_dump(), raw_response=raw_response(client, config))
+                if has_formatting_whitespace(probe.raw_text):
+                    raise ValueError("Compact audit preflight decoded formatting whitespace")
+                if (probe.model != result.model or probe.finish_reason != "stop"
+                        or probe.reasoning_tokens not in (None, 0) or probe.output_tokens > 512):
+                    raise ValueError("Audit preflight failed the model/output contract")
+                action = parse_action_json(probe.raw_text)
+                if not isinstance(action, AuditOptionsAction):
+                    raise ValueError("Audit preflight requires AUDIT_OPTIONS")
+                apply_action(state, action)
     except Exception as error:
         report["error"] = scrub_error(error, config)
         report["raw_response"] = raw_response(client, config)
         write_json(destination, report)
         raise ValueError(f"Preflight failed: {report['error']}") from error
     report["status"] = "passed"
-    report["raw_response"] = raw_response(client, config)
     write_json(destination, report)
     return report
 
@@ -219,12 +391,18 @@ def freeze(config: ExperimentConfig, root: Path, run_id: str, dev_run_id: str) -
     dev_manifest = read_json(dev_path / "manifest.json")
     check_manifest(config, root, dev_manifest, "dev")
     records = completed_records(dev_path, dev_manifest)
+    def valid_answer(row: dict) -> bool:
+        answer = row.get("final_answer")
+        if config.benchmark == "mslr":
+            return isinstance(answer, str) and bool(answer.strip())
+        return answer in ("A", "B", "C", "D")
+
     for method in config.methods:
         if not any(
             row["method"] == method
             and row["status"] == "completed"
             and row["termination_reason"] == "stop"
-            and row["final_answer"] in ("A", "B", "C", "D")
+            and valid_answer(row)
             and (
                 method != "legal_state"
                 or (

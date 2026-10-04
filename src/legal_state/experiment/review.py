@@ -62,6 +62,7 @@ def export_review(config: ExperimentConfig, root: Path, run_id: str) -> dict:
             "review_id": review_id,
             "case_id": cid,
             "question": cases[cid].question,
+            "case_text": cases[cid].stem,
             "required_issues": annotations[cid]["required_issues"],
             "incomplete_run": row["status"] == "failed",
             "reasoning_artifact": row["reasoning_artifact"],

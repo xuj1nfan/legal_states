@@ -1,5 +1,6 @@
 """Research tables and a fixed, balanced case-analysis selection."""
 
+import csv
 from pathlib import Path
 
 from legal_state.experiment.config import ExperimentConfig
@@ -11,6 +12,7 @@ def report(config: ExperimentConfig, root: Path, run_id: str) -> dict:
     path, manifest, records = load_run(config, root, run_id)
     scores = score(config, root, run_id)
     rows = scores["summary"]
+    is_mslr = scores.get("benchmark") == "mslr"
     process_path = path / "process_scores.json"
     process = read_json(process_path) if process_path.exists() else None
     if process is not None:
@@ -22,20 +24,31 @@ def report(config: ExperimentConfig, root: Path, run_id: str) -> dict:
         if read_json(snapshot) != process:
             raise ValueError("Process scores changed after import")
     lines = [
-        f"# LawBench 3-6 案例子集实验：{run_id}",
+        f"# {'MSLR 多步法律推理' if is_mslr else 'LawBench 3-6 案例子集'}实验：{run_id}",
         "",
         f"划分：{scores['split']}；样本数：{len(manifest['identity']['case_ids'])}。",
         "三组共享模型、原题、调用上限和输出预算；无额外法律知识。",
         "",
         "## 最终答案与运行质量",
         "",
-        "| 方法 | Accuracy | 无效答案率 | 执行失败率 | 格式失败率 | 预算/步数受限率 |",
+        (
+            "| 方法 | IRAC Recall | 空输出率 | 执行失败率 | 格式失败率 | 预算/步数受限率 |"
+            if is_mslr
+            else "| 方法 | Accuracy | 无效答案率 | 执行失败率 | 格式失败率 | 预算/步数受限率 |"
+        ),
         "|---|---:|---:|---:|---:|---:|",
     ]
     for row in rows:
+        primary = row["irac_recall"] if is_mslr else row["accuracy"]
+        empty = row["empty_prediction_rate"] if is_mslr else row["abstention_rate"]
         lines.append(
-            f"| {row['method']} | {row['accuracy']:.2%} | {row['abstention_rate']:.2%} | {row['failure_rate']:.2%} | {row['format_failure_rate']:.2%} | {row['limited_termination_rate']:.2%} |"
+            f"| {row['method']} | {primary:.2%} | {empty:.2%} | {row['failure_rate']:.2%} | {row['format_failure_rate']:.2%} | {row['limited_termination_rate']:.2%} |"
         )
+    if is_mslr and scores["metric"] == "literal_field_recall":
+        lines += [
+            "",
+            "当前为无需嵌入模型的字面字段覆盖率，仅用于快速诊断；正式结果应使用 --official-check 和 ChatLaw-Text2Vec。",
+        ]
     lines += [
         "",
         "## 成本",
@@ -57,7 +70,7 @@ def report(config: ExperimentConfig, root: Path, run_id: str) -> dict:
     for name, comparison in scores["comparisons"].items():
         lo, hi = comparison["ci95"]
         lines.append(
-            f"- {name}：准确率差 {comparison['difference'] * 100:+.2f} 个百分点，95% 配对 bootstrap 区间 [{lo * 100:+.2f}, {hi * 100:+.2f}]。"
+            f"- {name}：{'IRAC Recall' if is_mslr else '准确率'}差 {comparison['difference'] * 100:+.2f} 个百分点，95% 配对 bootstrap 区间 [{lo * 100:+.2f}, {hi * 100:+.2f}]。"
         )
     lines += ["", "## 人工过程评估", ""]
     if process is None:
@@ -78,29 +91,60 @@ def report(config: ExperimentConfig, root: Path, run_id: str) -> dict:
         "本结果覆盖冻结的案例子集；零外部知识设置同时包含知识不足与推理失误。",
         "状态字段、操作约束和校验共同构成方法，不能将差异全部归因于字段结构。",
         "相同预算上限不意味着实际输入成本相同。人工材料隐去方法名与正确性，但格式可能暴露方法。",
-        "置信区间跨零时，将方向性差异视为证据不足；本轮不是完整 LawBench 排行榜复现。",
+        "置信区间跨零时，将方向性差异视为证据不足；本轮是冻结子集上的受控比较。",
         "",
         "## 复现",
         "",
-        "数据与代码哈希、模型身份、解码设置及环境记录见 manifest.json；样本映射见 lawbench/sample_mapping.json。",
+        f"数据与代码哈希、模型身份、解码设置及环境记录见 manifest.json；样本映射见 {'mslr' if is_mslr else 'lawbench'}/sample_mapping.json。",
     ]
     write_text(path / "report.md", "\n".join(lines) + "\n")
     per_case = {}
     for row in records:
         per_case.setdefault(row["case_id"], {})[row["method"]] = row
-    exported = {
-        method: read_json(path / "lawbench" / method / "3-6.json")
-        for method in config.methods
-    }
+    if is_mslr:
+        with (path / "per_case_scores.csv").open(encoding="utf-8", newline="") as handle:
+            scored = list(csv.DictReader(handle))
+        values_by_case = {
+            cid: {
+                row["method"]: float(row["irac_recall"])
+                for row in scored
+                if row["case_id"] == cid
+            }
+            for cid in manifest["identity"]["case_ids"]
+        }
+    else:
+        exported = {
+            method: read_json(path / "lawbench" / method / "3-6.json")
+            for method in config.methods
+        }
     categories = {
         name: []
         for name in ("legal_win", "legal_loss", "all_wrong", "all_correct", "mixed")
     }
     for index, cid in enumerate(manifest["identity"]["case_ids"]):
-        values = {
-            method: item[str(index)]["prediction"] == item[str(index)]["refr"][5]
-            for method, item in exported.items()
-        }
+        values = (
+            values_by_case[cid]
+            if is_mslr
+            else {
+                method: item[str(index)]["prediction"] == item[str(index)]["refr"][5]
+                for method, item in exported.items()
+            }
+        )
+        if is_mslr:
+            legal = values["legal_state"]
+            baselines = (values["generic"], values["cot"])
+            if legal > max(baselines):
+                category = "legal_win"
+            elif legal < max(baselines):
+                category = "legal_loss"
+            elif all(value == 0 for value in values.values()):
+                category = "all_wrong"
+            elif all(value == 1 for value in values.values()):
+                category = "all_correct"
+            else:
+                category = "mixed"
+            categories[category].append(cid)
+            continue
         if values["legal_state"] and not values["generic"] and not values["cot"]:
             category = "legal_win"
         elif not values["legal_state"] and (values["generic"] or values["cot"]):

@@ -1,0 +1,35 @@
+experiment_id: mslr_v1
+benchmark: mslr
+task_id: task2
+seed: 20260930
+methods: [cot, generic, legal_state]
+knowledge_mode: closed_book
+legal_state_materials: stem_only
+legal_state_workflow: sequential
+legal_state_constrained_json: true
+legal_state_compact_json: true
+data_dir: data/processed/mslr
+runs_dir: runs
+upstream_dir: third_party/MSLR-Bench
+
+model:
+  name_env: LSP_MODEL
+  endpoint_env: LSP_ENDPOINT
+  api_key_env: LSP_API_KEY
+  temperature: 0
+  timeout_seconds: 300
+  provider_options: {}
+  hidden_reasoning_disabled: false
+
+reasoning:
+  max_steps: 32
+  max_output_tokens_per_call: 1024
+  max_output_tokens_total: 24576
+
+final_answer:
+  max_output_tokens: 2048
+
+execution:
+  concurrency: 1
+  automatic_retries: 0
+  repetitions: 1
